@@ -1,0 +1,185 @@
+name: GDEX OSDF Aggregate Results
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gdex-aggregate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WINDOW1_RUN: '33258362334'
+      FULL_RUN: '33258608866'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy
+      - name: Verify all operational windows completed
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 180); do
+            status=$(gh api repos/$REPO/actions/runs/$FULL_RUN --jq '.status')
+            conclusion=$(gh api repos/$REPO/actions/runs/$FULL_RUN --jq '.conclusion // ""')
+            count=$(gh api repos/$REPO/actions/runs/$FULL_RUN/artifacts --jq '.artifacts | map(select(.name | startswith("gdex-osdf-window-"))) | length')
+            echo "full_run status=$status conclusion=$conclusion artifacts=$count"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" != "success" ]; then
+                echo "Full run completed unsuccessfully" >&2
+                exit 1
+              fi
+              if [ "$count" -ne 19 ]; then
+                echo "Expected 19 window artifacts from windows 2-20, got $count" >&2
+                exit 1
+              fi
+              ok=1
+              break
+            fi
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Full run did not complete inside aggregation guard" >&2
+            exit 1
+          fi
+          w1=$(gh api repos/$REPO/actions/runs/$WINDOW1_RUN/artifacts --jq '.artifacts | map(select(.name == "gdex-osdf-window-1")) | length')
+          test "$w1" -eq 1
+      - name: Download result artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inputs/window-1 inputs/full
+          gh run download "$WINDOW1_RUN" -n gdex-osdf-window-1 -D inputs/window-1
+          gh run download "$FULL_RUN" -p 'gdex-osdf-window-*' -D inputs/full
+          find inputs -name operational_mae_by_window.csv -print | sort
+      - name: Aggregate and bootstrap
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import numpy as np
+          import pandas as pd
+
+          root=Path('inputs')
+          out=Path('aggregate_results'); out.mkdir(exist_ok=True)
+          mae_files=sorted(root.rglob('operational_mae_by_window.csv'))
+          rank_files=sorted(root.rglob('operational_ranking.csv'))
+          contrast_files=sorted(root.rglob('operational_contrasts.csv'))
+          if len(mae_files)!=20 or len(rank_files)!=20 or len(contrast_files)!=20:
+              raise RuntimeError(f'expected 20 files each; mae={len(mae_files)} rank={len(rank_files)} contrasts={len(contrast_files)}')
+
+          mae=pd.concat([pd.read_csv(p) for p in mae_files],ignore_index=True)
+          ranks=pd.concat([pd.read_csv(p) for p in rank_files],ignore_index=True)
+          contrasts=pd.concat([pd.read_csv(p) for p in contrast_files],ignore_index=True)
+          for d in (mae,ranks,contrasts):
+              d['window']=pd.to_numeric(d['window']).astype(int)
+          expected_windows=set(range(1,21))
+          if set(mae.window)!=expected_windows or set(ranks.window)!=expected_windows or set(contrasts.window)!=expected_windows:
+              raise RuntimeError('window coverage is not exactly 1..20')
+          if len(mae)!=1920: raise RuntimeError(f'unexpected mae rows {len(mae)}')
+          if len(contrasts)!=960: raise RuntimeError(f'unexpected contrast rows {len(contrasts)}')
+          if len(ranks)!=320: raise RuntimeError(f'unexpected ranking rows {len(ranks)}')
+          if mae.duplicated(['zone','window','mapping','condition','model']).any(): raise RuntimeError('duplicate MAE keys')
+          if contrasts.duplicated(['zone','window','mapping','model']).any(): raise RuntimeError('duplicate contrast keys')
+          if ranks.duplicated(['zone','window','mapping']).any(): raise RuntimeError('duplicate ranking keys')
+
+          mae.to_csv(out/'operational_mae_all.csv',index=False)
+          contrasts.to_csv(out/'operational_contrasts_all.csv',index=False)
+          ranks.to_csv(out/'operational_ranking_all.csv',index=False)
+
+          # Model-level distortion summaries.
+          ms=[]
+          for (mapping,model),q in contrasts.groupby(['mapping','model']):
+              oracle=pd.to_numeric(q['ORACLE_WEATHER'],errors='coerce')
+              op=pd.to_numeric(q['OPERATIONAL_GFS'],errors='coerce')
+              d=pd.to_numeric(q['D_operational_minus_oracle'],errors='coerce')
+              ms.append({
+                  'mapping':mapping,'model':model,'n_cells':len(q),
+                  'oracle_mae_mean':float(oracle.mean()),'operational_mae_mean':float(op.mean()),
+                  'mean_D':float(d.mean()),'median_D':float(d.median()),
+                  'aggregate_relative_increase_pct':float(100*d.mean()/oracle.mean()),
+                  'mean_cell_relative_increase_pct':float((100*d/oracle).mean()),
+                  'positive_D_share':float((d>0).mean())
+              })
+          model_summary=pd.DataFrame(ms).sort_values(['mapping','model'])
+          model_summary.to_csv(out/'model_summary.csv',index=False)
+
+          thresholds=[0,0.5,1,2,5,10]
+          rs=[]
+          for mapping,q in ranks.groupby('mapping'):
+              for th in thresholds:
+                  s=q[pd.to_numeric(q['oracle_margin'])>=th]
+                  rs.append({
+                      'mapping':mapping,'margin_threshold':th,'n_cells':len(s),
+                      'rank_change_rate':float(pd.to_numeric(s['rank_changed']).mean()) if len(s) else np.nan,
+                      'winner_change_rate':float(pd.to_numeric(s['winner_changed']).mean()) if len(s) else np.nan,
+                      'oracle_margin_median':float(pd.to_numeric(s['oracle_margin']).median()) if len(s) else np.nan,
+                  })
+          ranking_summary=pd.DataFrame(rs)
+          ranking_summary.to_csv(out/'ranking_summary.csv',index=False)
+
+          rng=np.random.default_rng(20260830)
+          B=5000
+          zones=sorted(contrasts.zone.unique()); windows=sorted(contrasts.window.unique())
+
+          def crossed_boot(q,value_col,mask=None):
+              z=q['zone'].to_numpy(); w=q['window'].to_numpy(); v=pd.to_numeric(q[value_col]).to_numpy(float)
+              if mask is None: base=np.ones(len(q),dtype=bool)
+              else: base=np.asarray(mask,dtype=bool)
+              vals=[]
+              for _ in range(B):
+                  zd=rng.choice(zones,len(zones),replace=True); wd=rng.choice(windows,len(windows),replace=True)
+                  zc={x:int((zd==x).sum()) for x in set(zd)}; wc={int(x):int((wd==x).sum()) for x in set(wd)}
+                  weights=np.fromiter((zc.get(zz,0)*wc.get(int(ww),0) for zz,ww in zip(z,w)),dtype=float,count=len(q))
+                  sel=base & (weights>0) & np.isfinite(v)
+                  sw=weights[sel].sum()
+                  if sw>0: vals.append(float(np.sum(weights[sel]*v[sel])/sw))
+              a=np.asarray(vals,float)
+              return float(np.quantile(a,.025)),float(np.quantile(a,.975)),len(a)
+
+          bms=[]
+          for (mapping,model),q in contrasts.groupby(['mapping','model']):
+              lo,hi,n=crossed_boot(q,'D_operational_minus_oracle')
+              bms.append({'mapping':mapping,'model':model,'statistic':'mean_D','estimate':float(pd.to_numeric(q['D_operational_minus_oracle']).mean()),'ci_low':lo,'ci_high':hi,'bootstrap_reps':n})
+          pd.DataFrame(bms).to_csv(out/'bootstrap_model_ci.csv',index=False)
+
+          br=[]
+          for mapping,q in ranks.groupby('mapping'):
+              for th in thresholds:
+                  mask=pd.to_numeric(q['oracle_margin']).to_numpy(float)>=th
+                  for col in ['winner_changed','rank_changed']:
+                      lo,hi,n=crossed_boot(q,col,mask)
+                      s=q.loc[mask]
+                      br.append({'mapping':mapping,'margin_threshold':th,'statistic':col+'_rate','estimate':float(pd.to_numeric(s[col]).mean()) if len(s) else np.nan,'ci_low':lo,'ci_high':hi,'n_cells':len(s),'bootstrap_reps':n})
+          pd.DataFrame(br).to_csv(out/'bootstrap_ranking_ci.csv',index=False)
+
+          meta={
+              'window1_run':33258362334,'full_run':33258608866,
+              'windows':list(range(1,21)),'zones':sorted(mae.zone.unique().tolist()),
+              'mappings':sorted(mae.mapping.unique().tolist()),'models':sorted(mae.model.unique().tolist()),
+              'n_mae_rows':len(mae),'n_contrast_rows':len(contrasts),'n_ranking_rows':len(ranks),
+              'bootstrap_method':'independent crossed resampling of zone and window clusters with multiplicity weights',
+              'bootstrap_reps':B,'bootstrap_seed':20260830
+          }
+          (out/'metadata.json').write_text(json.dumps(meta,indent=2,sort_keys=True))
+          print(model_summary.to_string(index=False))
+          print(ranking_summary.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdex-osdf-aggregate-results
+          path: aggregate_results/
+          retention-days: 90
