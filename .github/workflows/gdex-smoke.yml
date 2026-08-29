@@ -1,4 +1,4 @@
-name: GDEX Public Smoke Test
+name: GDEX Public 20-Window Validation
 
 on:
   push:
@@ -22,10 +22,15 @@ jobs:
       - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
       - run: pytest -q tests/test_gdex_operational_gfs.py
 
-  window-01:
+  operational-window:
     needs: contract-tests
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        window: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
     env:
       PYTHONPATH: .
     steps:
@@ -34,12 +39,16 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow
-      - name: Run window 1 operational GFS contrast
+      - name: Run operational GFS contrast
         run: |
-          python -m research.topic_lock.gdex_operational_gfs --windows '1' --outdir 'gdex_results/01'
+          mkdir -p "gdex_results/window-${{ matrix.window }}"
+          python -m research.topic_lock.gdex_operational_gfs \
+            --windows '${{ matrix.window }}' \
+            --outdir "gdex_results/window-${{ matrix.window }}"
+          git rev-parse HEAD > "gdex_results/window-${{ matrix.window }}/git_revision.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gdex-operational-01
-          path: gdex_results/01/
+          name: gdex-operational-window-${{ matrix.window }}
+          path: gdex_results/window-${{ matrix.window }}/
           retention-days: 90
