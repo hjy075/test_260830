@@ -1,4 +1,4 @@
-name: Historical GFS Access Probe
+name: OSDF GRIB Range Scanner
 
 on:
   push:
@@ -8,28 +8,97 @@ on:
   workflow_dispatch:
 
 jobs:
-  access-probe:
+  range-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: Probe OSDF raw 2017 object and AWS 2017 prefix
-        shell: bash
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests eccodes numpy
+      - name: Locate and decode only the 2m temperature GRIB message
         run: |
-          set -uo pipefail
-          FILE='gfs.0p25.2017081318.f009.grib2'
-          OSDF='https://osdf-data.gdex.ucar.edu/ncar/gdex/d084001/2017/20170813/'"$FILE"
-          echo '=== OSDF HEAD ==='
-          curl -sS -L --connect-timeout 20 --max-time 60 -D /tmp/osdf_head -o /dev/null "$OSDF" || true
-          cat /tmp/osdf_head || true
-          echo '=== OSDF RANGE 0-1023 ==='
-          code=$(curl -sS -L --connect-timeout 20 --max-time 60 -H 'Range: bytes=0-1023' -o /tmp/osdf_range -w '%{http_code}' "$OSDF" || true)
-          echo "HTTP=$code BYTES=$(wc -c </tmp/osdf_range 2>/dev/null || echo 0)"
-          if [ -s /tmp/osdf_range ]; then xxd -l 32 /tmp/osdf_range; fi
-          echo '=== AWS LIST 2017 PREFIX ==='
           python - <<'PY'
+          import os, time
+          import numpy as np
           import requests
-          for prefix in ['gfs.20170813','2017/20170813','20170813']:
-              r=requests.get('https://noaa-gfs-bdp-pds.s3.amazonaws.com/',params={'list-type':'2','prefix':prefix,'max-keys':'3'},timeout=30)
-              print('PREFIX',prefix,'STATUS',r.status_code,'HAS_KEY', '<Key>' in r.text, 'LEN',len(r.text))
-              print(r.text[:500].replace('\n',' '))
+          from eccodes import codes_grib_new_from_file, codes_get, codes_get_array, codes_release
+
+          origin = 'https://osdf-data.gdex.ucar.edu/ncar/gdex/d084001/2017/20170813/gfs.0p25.2017081318.f009.grib2'
+          sess = requests.Session()
+
+          def get_range(url, start, end, timeout=30):
+              r = sess.get(url, headers={'Range': f'bytes={start}-{end}'}, timeout=timeout)
+              r.raise_for_status()
+              if r.status_code != 206:
+                  raise RuntimeError(f'Range not honored: {r.status_code} {len(r.content)}')
+              return r
+
+          # Resolve Pelican director once, then pin subsequent range reads to the selected cache.
+          r0 = get_range(origin, 0, 2047, 60)
+          cache_url = r0.url
+          print('CACHE_URL', cache_url, flush=True)
+          print('FIRST_RANGE', r0.status_code, len(r0.content), flush=True)
+
+          offset = 0
+          target = None
+          t0 = time.time()
+          for msg_idx in range(1, 1201):
+              r = r0 if offset == 0 else get_range(cache_url, offset, offset + 2047)
+              b = r.content
+              if b[:4] != b'GRIB':
+                  raise RuntimeError(f'GRIB magic missing msg={msg_idx} offset={offset} head={b[:16]!r}')
+              total_len = int.from_bytes(b[8:16], 'big')
+              if total_len < 16:
+                  raise RuntimeError(f'bad length {total_len} at {offset}')
+
+              pos = 16
+              discipline = b[6]
+              info = None
+              while pos + 5 <= len(b):
+                  sec_len = int.from_bytes(b[pos:pos+4], 'big')
+                  sec_num = b[pos+4]
+                  if sec_len < 5:
+                      break
+                  if sec_num == 4 and pos + 34 <= len(b):
+                      template = int.from_bytes(b[pos+7:pos+9], 'big')
+                      cat = b[pos+9]
+                      num = b[pos+10]
+                      stype = b[pos+22] if template in (0,1,2,8,11,12,15) else None
+                      scale = b[pos+23] if stype is not None else None
+                      sval = int.from_bytes(b[pos+24:pos+28], 'big') if stype is not None else None
+                      level = None
+                      if stype is not None and scale != 255 and sval != 0xFFFFFFFF:
+                          signed_scale = scale if scale < 128 else scale - 256
+                          level = sval * (10 ** (-signed_scale))
+                      info = (discipline, cat, num, template, stype, level)
+                      break
+                  pos += sec_len
+
+              if msg_idx <= 5 or msg_idx % 50 == 0 or (info and info[1:3] == (0,0)):
+                  print('MSG', msg_idx, 'OFFSET', offset, 'LEN', total_len, 'INFO', info, 'ELAPSED', round(time.time()-t0,2), flush=True)
+              if info and info[0] == 0 and info[1] == 0 and info[2] == 0 and info[4] == 103 and abs(float(info[5]) - 2.0) < 1e-9:
+                  target = (msg_idx, offset, total_len, info)
+                  print('TARGET_FOUND', target, flush=True)
+                  break
+              offset += total_len
+          if target is None:
+              raise RuntimeError('2m temperature message not found')
+
+          msg_idx, start, total_len, info = target
+          full = get_range(cache_url, start, start + total_len - 1, 90).content
+          print('TARGET_BYTES', len(full), 'EXPECTED', total_len, flush=True)
+          open('/tmp/t2m.grib2','wb').write(full)
+          with open('/tmp/t2m.grib2','rb') as f:
+              gid = codes_grib_new_from_file(f)
+              print('ECCODES', codes_get(gid,'shortName'), codes_get(gid,'typeOfLevel'), codes_get(gid,'level'), codes_get(gid,'units'), flush=True)
+              vals = codes_get_array(gid,'values')
+              lats = codes_get_array(gid,'latitudes')
+              lons = codes_get_array(gid,'longitudes')
+              qlon = (-71.0098) % 360
+              dist = (lats - 42.3606)**2 + np.minimum(np.abs(lons-qlon), 360-np.abs(lons-qlon))**2
+              i = int(np.argmin(dist))
+              print('BOS_POINT', float(lats[i]), float(lons[i]), float(vals[i]), 'NPTS', len(vals), flush=True)
+              codes_release(gid)
+          print('TOTAL_ELAPSED', round(time.time()-t0,2), flush=True)
           PY
