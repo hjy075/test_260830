@@ -1,105 +1,24 @@
-name: OSDF 2m Offset Stability Probe
+name: GDEX OSDF Contract Test
 
 on:
   push:
     branches: [main]
     paths:
+      - 'research/topic_lock/gdex_operational_gfs.py'
+      - 'tests/test_gdex_operational_gfs.py'
       - '.github/workflows/gdex-smoke.yml'
   workflow_dispatch:
 
 jobs:
-  offset-probe:
+  contract-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        include:
-          - cycle: '2017081318'
-            date: '20170813'
-            lead: '090'
-          - cycle: '2017081318'
-            date: '20170813'
-            lead: '177'
-          - cycle: '2017091718'
-            date: '20170917'
-            lead: '009'
-          - cycle: '2017102218'
-            date: '20171022'
-            lead: '129'
-          - cycle: '2017122418'
-            date: '20171224'
-            lead: '180'
+    env:
+      PYTHONPATH: .
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
-      - name: Scan GRIB message headers until 2m temperature
-        env:
-          CYCLE: ${{ matrix.cycle }}
-          DATE: ${{ matrix.date }}
-          LEAD: ${{ matrix.lead }}
-        run: |
-          python - <<'PY'
-          import json, os, time
-          import requests
-
-          cycle=os.environ['CYCLE']; date=os.environ['DATE']; lead=os.environ['LEAD']
-          origin=f'https://osdf-data.gdex.ucar.edu/ncar/gdex/d084001/2017/{date}/gfs.0p25.{cycle}.f{lead}.grib2'
-          sess=requests.Session()
-
-          def get_range(url,start,end,timeout=60):
-              for attempt in range(5):
-                  try:
-                      r=sess.get(url,headers={'Range':f'bytes={start}-{end}'},timeout=timeout)
-                      if r.status_code in (500,502,503,504):
-                          if attempt==4: r.raise_for_status()
-                          time.sleep(min(8,2**attempt)); continue
-                      r.raise_for_status()
-                      if r.status_code!=206: raise RuntimeError(f'range not honored {r.status_code}')
-                      return r
-                  except (requests.exceptions.ReadTimeout,requests.exceptions.ConnectionError):
-                      if attempt==4: raise
-                      time.sleep(min(8,2**attempt))
-
-          r0=get_range(origin,0,2047,90)
-          cache=r0.url
-          cr=r0.headers.get('Content-Range','')
-          file_size=int(cr.rsplit('/',1)[-1]) if '/' in cr else None
-          print('FILE',cycle,lead,'CACHE',cache,'SIZE',file_size,flush=True)
-
-          offset=0; target=None; t0=time.time(); requests_n=0
-          for msg_idx in range(1,1201):
-              r=r0 if offset==0 else get_range(cache,offset,offset+2047)
-              requests_n+=1
-              b=r.content
-              if b[:4]!=b'GRIB': raise RuntimeError(f'GRIB magic missing idx={msg_idx} offset={offset}')
-              msg_len=int.from_bytes(b[8:16],'big')
-              if msg_len<16: raise RuntimeError(f'bad msg len {msg_len}')
-              discipline=b[6]; pos=16; info=None
-              while pos+5<=len(b):
-                  sec_len=int.from_bytes(b[pos:pos+4],'big'); sec_num=b[pos+4]
-                  if sec_len<5: break
-                  if sec_num==4 and pos+34<=len(b):
-                      template=int.from_bytes(b[pos+7:pos+9],'big')
-                      cat=b[pos+9]; num=b[pos+10]
-                      stype=b[pos+22] if template in (0,1,2,8,11,12,15) else None
-                      scale=b[pos+23] if stype is not None else None
-                      sval=int.from_bytes(b[pos+24:pos+28],'big') if stype is not None else None
-                      level=None
-                      if stype is not None and scale!=255 and sval!=0xFFFFFFFF:
-                          signed=scale if scale<128 else scale-256
-                          level=sval*(10**(-signed))
-                      info=(discipline,cat,num,template,stype,level)
-                      break
-                  pos+=sec_len
-              if info and info[0]==0 and info[1]==0 and info[2]==0 and info[4]==103 and abs(float(info[5])-2.0)<1e-9:
-                  target=(msg_idx,offset,msg_len); break
-              offset+=msg_len
-          if target is None: raise RuntimeError('2m target not found')
-          idx,off,length=target
-          result={'cycle':cycle,'lead':int(lead),'file_size':file_size,'message_index':idx,'offset':off,'message_length':length,'offset_ratio':off/file_size if file_size else None,'scan_requests':requests_n,'elapsed_s':round(time.time()-t0,3)}
-          print('RESULT_JSON',json.dumps(result,sort_keys=True),flush=True)
-          PY
+      - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
+      - run: pytest -q tests/test_gdex_operational_gfs.py
