@@ -1,0 +1,80 @@
+name: Extended Oracle Seed Null
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/seed-null-extended.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  seed-panel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        seed: [20260829,11,29,47,83,131,173,211,257,307,353,401,449,503,557,601,653,701,751,809,857,907,953,1009,1061]
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy scikit-learn datasets pyarrow
+      - name: Run oracle seed panel
+        run: |
+          mkdir -p seed_results/${{ matrix.seed }}
+          python -m research.topic_lock.gfc17_seed_null run \
+            --seed '${{ matrix.seed }}' \
+            --outdir seed_results/${{ matrix.seed }}
+          git rev-parse HEAD > seed_results/${{ matrix.seed }}/git_revision.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-seed-${{ matrix.seed }}
+          path: seed_results/${{ matrix.seed }}/
+          retention-days: 90
+
+  aggregate:
+    needs: seed-panel
+    if: needs.seed-panel.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oracle-seed-*
+          path: downloaded_seeds
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy scikit-learn datasets pyarrow
+      - name: Aggregate seed null
+        run: |
+          python -m research.topic_lock.gfc17_seed_null aggregate \
+            --input-dir downloaded_seeds \
+            --outdir seed_null_aggregate
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('seed_null_aggregate/seed_null_gate.json').read_text())
+          if report['alternate_seed_count'] < 20:
+              raise SystemExit(f"only {report['alternate_seed_count']} alternate seeds")
+          if not report['eligible_for_final_g3']:
+              raise SystemExit('final G3 seed-count gate failed')
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seed-null-extended-results
+          path: seed_null_aggregate/
+          retention-days: 90
