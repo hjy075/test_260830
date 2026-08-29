@@ -1,4 +1,4 @@
-name: GDEX OSDF Operational Smoke
+name: GDEX OSDF Full Operational Run
 
 on:
   push:
@@ -23,10 +23,15 @@ jobs:
       - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
       - run: pytest -q tests/test_gdex_operational_gfs.py
 
-  operational-window-1:
+  operational-window:
     needs: contract-tests
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        window: [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
     env:
       PYTHONPATH: .
     steps:
@@ -35,16 +40,24 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow eccodes
-      - name: Run window 1 through OSDF range extraction
+      - name: Restore partial cache from an earlier attempt of this run
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gdex-osdf-window-${{ matrix.window }}
+          path: gdex_results/window-${{ matrix.window }}
+          run-id: ${{ github.run_id }}
+      - name: Run operational window through OSDF range extraction
         run: |
-          mkdir -p gdex_results/window-1
+          mkdir -p gdex_results/window-${{ matrix.window }}
           python -m research.topic_lock.gdex_operational_gfs \
-            --windows '1' \
-            --outdir gdex_results/window-1
-          git rev-parse HEAD > gdex_results/window-1/git_revision.txt
+            --windows '${{ matrix.window }}' \
+            --outdir gdex_results/window-${{ matrix.window }}
+          git rev-parse HEAD > gdex_results/window-${{ matrix.window }}/git_revision.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gdex-osdf-window-1
-          path: gdex_results/window-1/
+          name: gdex-osdf-window-${{ matrix.window }}
+          path: gdex_results/window-${{ matrix.window }}/
           retention-days: 90
+          overwrite: true
