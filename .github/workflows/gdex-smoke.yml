@@ -6,6 +6,7 @@ on:
     paths:
       - 'research/topic_lock/gdex_operational_gfs.py'
       - 'tests/test_gdex_operational_gfs.py'
+      - 'tests/test_gdex_sensitivity.py'
       - '.github/workflows/gdex-smoke.yml'
   workflow_dispatch:
 
@@ -21,7 +22,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
-      - run: pytest -q tests/test_gdex_operational_gfs.py
+      - run: pytest -q tests/test_gdex_operational_gfs.py tests/test_gdex_sensitivity.py
 
   operational-window:
     if: github.event_name == 'workflow_dispatch'
