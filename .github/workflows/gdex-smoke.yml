@@ -1,4 +1,4 @@
-name: GDEX Public Retry Smoke Test
+name: GDEX OPeNDAP Smoke Test
 
 on:
   push:
@@ -22,28 +22,52 @@ jobs:
       - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
       - run: pytest -q tests/test_gdex_operational_gfs.py
 
-  operational-window:
+  opendap-smoke:
     needs: contract-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    env:
-      PYTHONPATH: .
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow
-      - name: Run operational GFS contrast
+      - run: pip install netCDF4 numpy
+      - name: Read one 2m temperature point through OPeNDAP
         run: |
-          mkdir -p gdex_results/window-1
-          python -m research.topic_lock.gdex_operational_gfs \
-            --windows '1' \
-            --outdir gdex_results/window-1
-          git rev-parse HEAD > gdex_results/window-1/git_revision.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: gdex-operational-window-1
-          path: gdex_results/window-1/
-          retention-days: 90
+          python - <<'PY'
+          import json
+          import numpy as np
+          from netCDF4 import Dataset
+
+          url = 'https://tds.gdex.ucar.edu/thredds/dodsC/files/g/d084001/2017/20170813/gfs.0p25.2017081318.f009.grib2'
+          print('OPEN', url, flush=True)
+          ds = Dataset(url)
+          print('OPEN_OK', flush=True)
+          vars_ = list(ds.variables)
+          print('N_VARS', len(vars_), flush=True)
+          temp = next((v for v in vars_ if v == 'Temperature_height_above_ground'), None)
+          if temp is None:
+              temp = next(v for v in vars_ if 'Temperature' in v and 'height_above_ground' in v)
+          print('TEMP_VAR', temp, flush=True)
+          da = ds.variables[temp]
+          print('TEMP_DIMS', da.dimensions, 'SHAPE', da.shape, flush=True)
+          coords = {}
+          for name in da.dimensions:
+              if name in ds.variables:
+                  coords[name] = {'shape': ds.variables[name].shape, 'units': getattr(ds.variables[name], 'units', '')}
+          print('COORDS', json.dumps(coords), flush=True)
+          lat_name = next(n for n in da.dimensions if 'lat' in n.lower())
+          lon_name = next(n for n in da.dimensions if 'lon' in n.lower())
+          lats = np.asarray(ds.variables[lat_name][:])
+          lons = np.asarray(ds.variables[lon_name][:])
+          lat_i = int(np.abs(lats - 42.3606).argmin())
+          qlon = (-71.0098) % 360 if np.nanmin(lons) >= 0 else -71.0098
+          lon_i = int(np.abs(lons - qlon).argmin())
+          index = []
+          for dim in da.dimensions:
+              if dim == lat_name: index.append(lat_i)
+              elif dim == lon_name: index.append(lon_i)
+              else: index.append(0)
+          value = float(np.asarray(da[tuple(index)]).reshape(-1)[0])
+          print('POINT_OK', value, getattr(da, 'units', ''), 'lat_idx', lat_i, 'lon_idx', lon_i, flush=True)
+          ds.close()
+          PY
