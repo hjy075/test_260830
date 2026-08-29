@@ -1,0 +1,46 @@
+name: Inspect Second Lineage Candidates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-second-lineage.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install datasets pandas numpy pyarrow
+      - name: Inspect FEV candidate datasets
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+          from datasets import load_dataset
+          out=[]
+          for config in ['proenfo_gfc12','proenfo_gfc14','entsoe_1H']:
+              ds=load_dataset('autogluon/fev_datasets', config, split='train')
+              for i,row in enumerate(ds):
+                  ts=pd.to_datetime(row['timestamp'])
+                  rec={'config':config,'row':i,'id':str(row['id']),'n':len(ts),'start':str(ts.min()),'end':str(ts.max()),'columns':','.join(ds.column_names)}
+                  for c in ds.column_names:
+                      if c in ('id','timestamp'): continue
+                      vals=pd.Series(row[c], dtype='float64')
+                      rec[c+'_na']=int(vals.isna().sum())
+                      rec[c+'_mean']=float(vals.mean())
+                  out.append(rec)
+          Path('inspect').mkdir(exist_ok=True)
+          pd.DataFrame(out).to_csv('inspect/candidates.csv',index=False)
+          print(pd.DataFrame(out).to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: second-lineage-inspection
+          path: inspect/candidates.csv
+          if-no-files-found: error
+          retention-days: 30
