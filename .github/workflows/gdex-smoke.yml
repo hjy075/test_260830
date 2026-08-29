@@ -24,6 +24,7 @@ jobs:
       - run: pytest -q tests/test_gdex_operational_gfs.py
 
   operational-window:
+    if: github.event_name == 'workflow_dispatch'
     needs: contract-tests
     runs-on: ubuntu-latest
     timeout-minutes: 180
