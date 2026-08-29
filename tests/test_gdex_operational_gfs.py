@@ -1,3 +1,4 @@
+# trigger public Actions after workflow registration
 import pandas as pd
 import requests
 from research.topic_lock.gdex_operational_gfs import build_ncss_url, cycle_and_leads, local_horizon_to_utc, MAPPING_VARIANTS, _request_with_retries
