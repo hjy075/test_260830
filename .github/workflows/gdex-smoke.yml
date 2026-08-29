@@ -1,4 +1,4 @@
-name: GDEX OSDF Contract Test
+name: GDEX OSDF Operational Smoke
 
 on:
   push:
@@ -22,3 +22,29 @@ jobs:
           python-version: '3.11'
       - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
       - run: pytest -q tests/test_gdex_operational_gfs.py
+
+  operational-window-1:
+    needs: contract-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow eccodes
+      - name: Run window 1 through OSDF range extraction
+        run: |
+          mkdir -p gdex_results/window-1
+          python -m research.topic_lock.gdex_operational_gfs \
+            --windows '1' \
+            --outdir gdex_results/window-1
+          git rev-parse HEAD > gdex_results/window-1/git_revision.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gdex-osdf-window-1
+          path: gdex_results/window-1/
+          retention-days: 90
