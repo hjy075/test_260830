@@ -1,0 +1,42 @@
+name: GDEX Public Smoke Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/topic_lock/gdex_operational_gfs.py'
+      - 'research/topic_lock/gfc17_seed_null.py'
+      - 'tests/test_gdex_operational_gfs.py'
+      - '.github/workflows/gdex-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
+      - run: pytest -q tests/test_gdex_operational_gfs.py
+
+  window-01:
+    needs: contract-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow
+      - name: Run window 1 operational GFS contrast
+        run: |
+          python -m research.topic_lock.gdex_operational_gfs --windows '1' --outdir 'gdex_results/01'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gdex-operational-01
+          path: gdex_results/01/
+          retention-days: 90
