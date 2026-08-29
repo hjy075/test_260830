@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from research.topic_lock.gfc17_seed_null import (
     compare_seed_rankings,
@@ -23,7 +24,7 @@ def test_compare_seed_rankings_carries_reference_margin():
         ('Z', 2, 'HGB', 1.0), ('Z', 2, 'RF', 1.3), ('Z', 2, 'ET', 5.0),
     ])
     detail = compare_seed_rankings(reference, alternate, 100, 200)
-    assert detail['reference_margin'].tolist() == [2.0, 0.4]
+    assert detail['reference_margin'].tolist() == pytest.approx([2.0, 0.4])
     assert detail['winner_changed'].tolist() == [True, False]
 
 
