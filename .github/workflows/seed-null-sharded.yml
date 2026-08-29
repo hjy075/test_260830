@@ -1,0 +1,133 @@
+name: Sharded Extended Oracle Seed Null
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/seed-null-sharded.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cancel-slower-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel superseded unsharded run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            repos/${GITHUB_REPOSITORY}/actions/runs/33260740495/cancel || true
+
+  seed-zone:
+    needs: cancel-slower-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        seed: [20260829,11,29,47,83,131,173,211,257,307,353,401,449,503,557,601,653,701,751,809,857,907,953,1009,1061]
+        zone_index: [0,1,2,3,4,5,6,7]
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy scikit-learn datasets pyarrow
+      - name: Run one-zone oracle seed shard
+        env:
+          SEED: ${{ matrix.seed }}
+          ZONE_INDEX: ${{ matrix.zone_index }}
+        run: |
+          mkdir -p shard
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import research.topic_lock.gfc17_seed_null as s
+
+          seed = int(os.environ['SEED'])
+          zone_index = int(os.environ['ZONE_INDEX'])
+          full = s._load_fev_long()
+          zones = sorted(full['id'].astype(str).unique())
+          if zone_index >= len(zones):
+              raise SystemExit(f'zone_index={zone_index} but only {len(zones)} zones')
+          zone = zones[zone_index]
+          filtered = full[full['id'].astype(str) == zone].copy()
+          s._load_fev_long = lambda: filtered
+          result = s.run_oracle_seed(seed)
+          if len(result) != s.NUM_WINDOWS * 3:
+              raise SystemExit(f'incomplete shard rows={len(result)}')
+          result.to_csv(Path('shard') / f'seed_{seed}_zone_{zone_index}.csv', index=False)
+          (Path('shard') / 'zone.txt').write_text(zone, encoding='utf-8')
+          print(seed, zone_index, zone, len(result))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-shard-${{ matrix.seed }}-${{ matrix.zone_index }}
+          path: shard/
+          retention-days: 30
+
+  aggregate:
+    needs: seed-zone
+    if: needs.seed-zone.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oracle-shard-*
+          path: downloaded_shards
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy scikit-learn datasets pyarrow
+      - name: Reassemble seed panels and compute null
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path('downloaded_shards')
+          combined = Path('combined_seeds')
+          combined.mkdir(exist_ok=True)
+          files = sorted(root.rglob('seed_*_zone_*.csv'))
+          if len(files) != 25 * 8:
+              raise SystemExit(f'got {len(files)} shard files, expected 200')
+          all_df = pd.concat([pd.read_csv(p) for p in files], ignore_index=True)
+          for seed, g in all_df.groupby('seed', sort=True):
+              if len(g) != 8 * 20 * 3:
+                  raise SystemExit(f'seed {seed}: rows={len(g)} expected=480')
+              if g['zone'].nunique() != 8 or g['window'].nunique() != 20 or g['model'].nunique() != 3:
+                  raise SystemExit(f'seed {seed}: incomplete coverage')
+              if g.duplicated(['zone','window','model']).any():
+                  raise SystemExit(f'seed {seed}: duplicate keys')
+              g.to_csv(combined / f'seed_{int(seed)}.csv', index=False)
+          print('combined seeds', all_df['seed'].nunique())
+          PY
+          python -m research.topic_lock.gfc17_seed_null aggregate \
+            --input-dir combined_seeds \
+            --outdir seed_null_sharded_aggregate
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('seed_null_sharded_aggregate/seed_null_gate.json').read_text())
+          if report['alternate_seed_count'] != 24:
+              raise SystemExit(f"alternate seeds={report['alternate_seed_count']} expected=24")
+          if not report['eligible_for_final_g3']:
+              raise SystemExit('G3 seed-count gate not met')
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seed-null-sharded-results
+          path: seed_null_sharded_aggregate/
+          retention-days: 90
