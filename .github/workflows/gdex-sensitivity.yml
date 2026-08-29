@@ -1,0 +1,177 @@
+name: GDEX Cycle and Same-Source Sensitivity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gdex-sensitivity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sensitivity-window:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        window: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow eccodes
+      - name: Restore same-run partial cache
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gdex-sensitivity-cache-${{ matrix.window }}
+          path: sensitivity_results/window-${{ matrix.window }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Run latest-cycle and same-source analysis sensitivity
+        run: |
+          mkdir -p sensitivity_results/window-${{ matrix.window }}
+          python -m research.topic_lock.gdex_sensitivity \
+            --windows '${{ matrix.window }}' \
+            --outdir sensitivity_results/window-${{ matrix.window }}
+          git rev-parse HEAD > sensitivity_results/window-${{ matrix.window }}/git_revision.txt
+      - name: Upload compact result
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdex-sensitivity-result-${{ matrix.window }}
+          path: |
+            sensitivity_results/window-${{ matrix.window }}/*.csv
+            sensitivity_results/window-${{ matrix.window }}/git_revision.txt
+          retention-days: 90
+      - name: Upload resumable cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdex-sensitivity-cache-${{ matrix.window }}
+          path: sensitivity_results/window-${{ matrix.window }}/
+          retention-days: 30
+          overwrite: true
+
+  aggregate:
+    needs: sensitivity-window
+    if: needs.sensitivity-window.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gdex-sensitivity-result-*
+          path: downloaded
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy
+      - name: Aggregate 20-window sensitivity panel
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+
+          root = Path('downloaded')
+          out = Path('sensitivity_aggregate')
+          out.mkdir(exist_ok=True)
+
+          def collect(name, expected_files):
+              files = sorted(root.rglob(name))
+              if len(files) != expected_files:
+                  raise RuntimeError(f'{name}: got {len(files)} files, expected {expected_files}')
+              return pd.concat([pd.read_csv(p) for p in files], ignore_index=True)
+
+          mae = collect('sensitivity_mae_by_window.csv', 20)
+          con = collect('sensitivity_contrasts.csv', 20)
+          rank = collect('sensitivity_ranking.csv', 20)
+
+          if len(mae) != 2880:
+              raise RuntimeError(f'MAE row count {len(mae)} != 2880')
+          if len(con) != 960:
+              raise RuntimeError(f'contrast row count {len(con)} != 960')
+          if len(rank) != 960:
+              raise RuntimeError(f'ranking row count {len(rank)} != 960')
+          if mae.duplicated(['zone','window','mapping','condition','model']).any():
+              raise RuntimeError('duplicate MAE keys')
+          if con.duplicated(['zone','window','mapping','model']).any():
+              raise RuntimeError('duplicate contrast keys')
+          if rank.duplicated(['zone','window','mapping','comparison']).any():
+              raise RuntimeError('duplicate ranking keys')
+          if mae['window'].nunique() != 20 or mae['zone'].nunique() != 8:
+              raise RuntimeError('incomplete window/zone coverage')
+
+          mae.to_csv(out/'sensitivity_mae_all.csv', index=False)
+          con.to_csv(out/'sensitivity_contrasts_all.csv', index=False)
+          rank.to_csv(out/'sensitivity_ranking_all.csv', index=False)
+
+          condition_means = (
+              mae.groupby(['mapping','model','condition'], as_index=False)['mae'].mean()
+                 .pivot(index=['mapping','model'], columns='condition', values='mae')
+                 .reset_index()
+          )
+          contrast_means = con.groupby(['mapping','model'], as_index=False)[
+              ['D_analysis_minus_oracle','D_same00_minus_analysis','D_same00_minus_oracle']
+          ].mean()
+          summary = condition_means.merge(contrast_means, on=['mapping','model'], how='inner')
+          summary['analysis_vs_oracle_pct'] = 100 * summary['D_analysis_minus_oracle'] / summary['ORACLE_WEATHER']
+          summary['same00_vs_analysis_pct'] = 100 * summary['D_same00_minus_analysis'] / summary['GFS_ANALYSIS']
+          summary['same00_vs_oracle_pct'] = 100 * summary['D_same00_minus_oracle'] / summary['ORACLE_WEATHER']
+          summary['forecast_increment_share_of_total'] = summary['D_same00_minus_analysis'] / summary['D_same00_minus_oracle']
+          summary.to_csv(out/'sensitivity_model_summary.csv', index=False)
+
+          thresholds = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
+          rows = []
+          for (mapping, comparison), g in rank.groupby(['mapping','comparison']):
+              for t in thresholds:
+                  x = g if t <= 0 else g[g['from_margin'] >= t]
+                  rows.append({
+                      'mapping': mapping,
+                      'comparison': comparison,
+                      'margin_threshold': t,
+                      'n_cells': len(x),
+                      'rank_change_rate': float(x['rank_changed'].mean()) if len(x) else np.nan,
+                      'winner_change_rate': float(x['winner_changed'].mean()) if len(x) else np.nan,
+                  })
+          pd.DataFrame(rows).to_csv(out/'sensitivity_ranking_summary.csv', index=False)
+
+          rng = np.random.default_rng(20260830)
+          boot_rows = []
+          contrast_cols = ['D_analysis_minus_oracle','D_same00_minus_analysis','D_same00_minus_oracle']
+          for (mapping, model), g in con.groupby(['mapping','model']):
+              for col in contrast_cols:
+                  mat = g.pivot(index='zone', columns='window', values=col)
+                  if mat.shape != (8, 20) or mat.isna().any().any():
+                      raise RuntimeError(f'incomplete bootstrap matrix {mapping} {model} {col}: {mat.shape}')
+                  arr = mat.to_numpy(float)
+                  vals = np.empty(5000)
+                  for b in range(5000):
+                      rz = rng.integers(0, arr.shape[0], arr.shape[0])
+                      rw = rng.integers(0, arr.shape[1], arr.shape[1])
+                      vals[b] = arr[np.ix_(rz, rw)].mean()
+                  boot_rows.append({
+                      'mapping': mapping,
+                      'model': model,
+                      'contrast': col,
+                      'mean': float(arr.mean()),
+                      'ci_low': float(np.quantile(vals, 0.025)),
+                      'ci_high': float(np.quantile(vals, 0.975)),
+                  })
+          pd.DataFrame(boot_rows).to_csv(out/'sensitivity_bootstrap_ci.csv', index=False)
+          print(summary.to_string(index=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdex-sensitivity-aggregate-results
+          path: sensitivity_aggregate/
+          retention-days: 90
