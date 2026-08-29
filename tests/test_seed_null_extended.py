@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from research.topic_lock.gfc17_seed_null import (
+    _load_fev_long,
     compare_seed_rankings,
     summarize_seed_null,
 )
@@ -43,3 +44,21 @@ def test_margin_summary_conditions_on_reference_margin():
     assert hard_rows.loc[200, 'winner_change_rate'] == 1.0
     assert hard_rows.loc[300, 'winner_change_rate'] == 0.0
     assert hard_rows.loc[200, 'n_cells'] == 1
+
+
+def test_load_fev_long_honors_fixed_local_parquet(monkeypatch, tmp_path):
+    p = tmp_path / 'gfc17.parquet'
+    pd.DataFrame([
+        {
+            'id': 'Z1',
+            'timestamp': [pd.Timestamp('2017-01-01 00:00'), pd.Timestamp('2017-01-01 01:00')],
+            'target': [10.0, 11.0],
+            'airtemperature': [30.0, 31.0],
+        }
+    ]).to_parquet(p)
+    monkeypatch.setenv('FEV_GFC17_PARQUET', str(p))
+    out = _load_fev_long()
+    assert out[['id', 'target', 'airtemperature']].to_dict('records') == [
+        {'id': 'Z1', 'target': 10.0, 'airtemperature': 30.0},
+        {'id': 'Z1', 'target': 11.0, 'airtemperature': 31.0},
+    ]
