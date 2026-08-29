@@ -1,0 +1,55 @@
+name: Cache FEV GFC17 Input
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cache-fev-gfc17.yml'
+  workflow_dispatch:
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download exact GFC17 parquet directly
+        run: |
+          set -euo pipefail
+          mkdir -p fev_input
+          URL='https://huggingface.co/datasets/autogluon/fev_datasets/resolve/main/proenfo_gfc17/train-00000-of-00001.parquet?download=true'
+          for n in $(seq 1 12); do
+            echo "attempt $n"
+            code=$(curl -L --connect-timeout 30 --max-time 300 -sS -w '%{http_code}' -o fev_input/proenfo_gfc17.parquet.tmp "$URL" || true)
+            size=$(wc -c < fev_input/proenfo_gfc17.parquet.tmp 2>/dev/null || echo 0)
+            echo "http=$code size=$size"
+            if [ "$code" = "200" ] && [ "$size" -gt 1000000 ]; then
+              mv fev_input/proenfo_gfc17.parquet.tmp fev_input/proenfo_gfc17.parquet
+              break
+            fi
+            rm -f fev_input/proenfo_gfc17.parquet.tmp
+            sleep $((n * 5))
+          done
+          test -s fev_input/proenfo_gfc17.parquet
+          ls -lh fev_input/proenfo_gfc17.parquet
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate parquet contract
+        run: |
+          pip install pandas pyarrow
+          python - <<'PY'
+          import pandas as pd
+          p='fev_input/proenfo_gfc17.parquet'
+          df=pd.read_parquet(p)
+          assert len(df)==8, len(df)
+          assert {'id','timestamp','target','airtemperature'} <= set(df.columns)
+          assert all(len(x)==17544 for x in df['timestamp'])
+          print(df[['id']].to_string(index=False))
+          print('validated rows=',len(df),'series_len=',len(df.iloc[0]['timestamp']))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fev-gfc17-fixed-input
+          path: fev_input/proenfo_gfc17.parquet
+          if-no-files-found: error
+          retention-days: 30
