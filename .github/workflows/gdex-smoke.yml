@@ -4,8 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'research/topic_lock/gdex_operational_gfs.py'
-      - 'research/topic_lock/gfc17_seed_null.py'
+      - 'research/**'
       - 'tests/test_gdex_operational_gfs.py'
       - '.github/workflows/gdex-smoke.yml'
   workflow_dispatch:
@@ -13,6 +12,8 @@ on:
 jobs:
   contract-tests:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,6 +26,8 @@ jobs:
     needs: contract-tests
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
