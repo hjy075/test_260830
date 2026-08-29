@@ -26,3 +26,18 @@ def test_transient_read_timeout_is_retried():
             if self.calls==1: raise requests.exceptions.ReadTimeout('transient')
             return Response()
     s=Session(); r=_request_with_retries(s,'https://example.invalid',attempts=2,timeout=1,sleep_fn=lambda _:None); assert r.status_code==200; assert s.calls==2
+
+def test_transient_http_504_is_retried():
+    class Response:
+        content=b'x'*256
+        text='gateway timeout'
+        def __init__(self,status_code): self.status_code=status_code
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.exceptions.HTTPError(f'{self.status_code} error', response=self)
+    class Session:
+        def __init__(self): self.calls=0
+        def get(self,url,timeout):
+            self.calls+=1
+            return Response(504 if self.calls==1 else 200)
+    s=Session(); r=_request_with_retries(s,'https://example.invalid',attempts=2,timeout=1,sleep_fn=lambda _:None); assert r.status_code==200; assert s.calls==2
