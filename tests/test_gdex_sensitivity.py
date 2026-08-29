@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from research.topic_lock.gdex_operational_gfs import (
+from research.topic_lock.gdex_sensitivity import (
     analysis_cycles_for_horizon,
     cycle_and_leads,
 )
