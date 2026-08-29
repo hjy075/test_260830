@@ -1,0 +1,61 @@
+name: Recover Previous18 Compact Aggregate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-previous18.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install analysis dependency
+        run: pip install pandas
+      - name: Download historical Previous18 artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p recovered
+          gh run download 33258362334 -n gdex-osdf-window-1 -D recovered/window-1
+          for w in $(seq 2 20); do
+            gh run download 33258608866 -n "gdex-osdf-window-${w}" -D "recovered/window-${w}"
+          done
+      - name: Build compact Previous18 aggregate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path('recovered')
+          mae_files = sorted(root.rglob('operational_mae_by_window.csv'))
+          contrast_files = sorted(root.rglob('operational_contrasts.csv'))
+          ranking_files = sorted(root.rglob('operational_ranking.csv'))
+          if len(mae_files) != 20:
+              raise SystemExit(f'Expected 20 MAE files, found {len(mae_files)}: {mae_files}')
+          out = Path('previous18_compact')
+          out.mkdir(exist_ok=True)
+          pd.concat([pd.read_csv(p) for p in mae_files], ignore_index=True).to_csv(out/'previous18_mae_by_window.csv', index=False)
+          if contrast_files:
+              pd.concat([pd.read_csv(p) for p in contrast_files], ignore_index=True).to_csv(out/'previous18_contrasts.csv', index=False)
+          if ranking_files:
+              pd.concat([pd.read_csv(p) for p in ranking_files], ignore_index=True).to_csv(out/'previous18_ranking.csv', index=False)
+          print('mae_files', len(mae_files), 'contrast_files', len(contrast_files), 'ranking_files', len(ranking_files))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: previous18-compact-aggregate
+          path: previous18_compact/
+          if-no-files-found: error
+          retention-days: 30
