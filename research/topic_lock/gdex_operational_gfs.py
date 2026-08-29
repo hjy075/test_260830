@@ -45,6 +45,9 @@ def _request_with_retries(session,url,attempts=8,timeout=90,sleep_fn=time.sleep)
   try:
    r=session.get(url,timeout=timeout)
    if 400<=r.status_code<500: raise RuntimeError(f'NCSS {r.status_code}: {r.text[:500]} URL={url}')
+   if r.status_code>=500:
+    if attempt==attempts-1: r.raise_for_status()
+    sleep_fn(min(30,2**attempt)); continue
    r.raise_for_status(); return r
   except RuntimeError: raise
   except (requests.exceptions.ReadTimeout,requests.exceptions.ConnectionError):
