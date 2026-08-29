@@ -1,73 +1,35 @@
-name: GDEX OPeNDAP Smoke Test
+name: Historical GFS Access Probe
 
 on:
   push:
     branches: [main]
     paths:
-      - 'research/**'
-      - 'tests/test_gdex_operational_gfs.py'
       - '.github/workflows/gdex-smoke.yml'
   workflow_dispatch:
 
 jobs:
-  contract-tests:
+  access-probe:
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: .
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
-      - run: pytest -q tests/test_gdex_operational_gfs.py
-
-  opendap-smoke:
-    needs: contract-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install netCDF4 numpy
-      - name: Read one 2m temperature point through OPeNDAP
+      - name: Probe OSDF raw 2017 object and AWS 2017 prefix
+        shell: bash
         run: |
+          set -uo pipefail
+          FILE='gfs.0p25.2017081318.f009.grib2'
+          OSDF='https://osdf-data.gdex.ucar.edu/ncar/gdex/d084001/2017/20170813/'"$FILE"
+          echo '=== OSDF HEAD ==='
+          curl -sS -L --connect-timeout 20 --max-time 60 -D /tmp/osdf_head -o /dev/null "$OSDF" || true
+          cat /tmp/osdf_head || true
+          echo '=== OSDF RANGE 0-1023 ==='
+          code=$(curl -sS -L --connect-timeout 20 --max-time 60 -H 'Range: bytes=0-1023' -o /tmp/osdf_range -w '%{http_code}' "$OSDF" || true)
+          echo "HTTP=$code BYTES=$(wc -c </tmp/osdf_range 2>/dev/null || echo 0)"
+          if [ -s /tmp/osdf_range ]; then xxd -l 32 /tmp/osdf_range; fi
+          echo '=== AWS LIST 2017 PREFIX ==='
           python - <<'PY'
-          import json
-          import numpy as np
-          from netCDF4 import Dataset
-
-          url = 'https://tds.gdex.ucar.edu/thredds/dodsC/files/g/d084001/2017/20170813/gfs.0p25.2017081318.f009.grib2'
-          print('OPEN', url, flush=True)
-          ds = Dataset(url)
-          print('OPEN_OK', flush=True)
-          vars_ = list(ds.variables)
-          print('N_VARS', len(vars_), flush=True)
-          temp = next((v for v in vars_ if v == 'Temperature_height_above_ground'), None)
-          if temp is None:
-              temp = next(v for v in vars_ if 'Temperature' in v and 'height_above_ground' in v)
-          print('TEMP_VAR', temp, flush=True)
-          da = ds.variables[temp]
-          print('TEMP_DIMS', da.dimensions, 'SHAPE', da.shape, flush=True)
-          coords = {}
-          for name in da.dimensions:
-              if name in ds.variables:
-                  coords[name] = {'shape': ds.variables[name].shape, 'units': getattr(ds.variables[name], 'units', '')}
-          print('COORDS', json.dumps(coords), flush=True)
-          lat_name = next(n for n in da.dimensions if 'lat' in n.lower())
-          lon_name = next(n for n in da.dimensions if 'lon' in n.lower())
-          lats = np.asarray(ds.variables[lat_name][:])
-          lons = np.asarray(ds.variables[lon_name][:])
-          lat_i = int(np.abs(lats - 42.3606).argmin())
-          qlon = (-71.0098) % 360 if np.nanmin(lons) >= 0 else -71.0098
-          lon_i = int(np.abs(lons - qlon).argmin())
-          index = []
-          for dim in da.dimensions:
-              if dim == lat_name: index.append(lat_i)
-              elif dim == lon_name: index.append(lon_i)
-              else: index.append(0)
-          value = float(np.asarray(da[tuple(index)]).reshape(-1)[0])
-          print('POINT_OK', value, getattr(da, 'units', ''), 'lat_idx', lat_i, 'lon_idx', lon_i, flush=True)
-          ds.close()
+          import requests
+          for prefix in ['gfs.20170813','2017/20170813','20170813']:
+              r=requests.get('https://noaa-gfs-bdp-pds.s3.amazonaws.com/',params={'list-type':'2','prefix':prefix,'max-keys':'3'},timeout=30)
+              print('PREFIX',prefix,'STATUS',r.status_code,'HAS_KEY', '<Key>' in r.text, 'LEN',len(r.text))
+              print(r.text[:500].replace('\n',' '))
           PY
