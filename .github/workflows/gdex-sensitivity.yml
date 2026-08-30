@@ -22,12 +22,20 @@ jobs:
         window: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
     env:
       PYTHONPATH: .
+      FEV_GFC17_PARQUET: fev_input/proenfo_gfc17.parquet
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: pip install pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow eccodes
+      - name: Download fixed FEV GFC17 input
+        uses: actions/download-artifact@v4
+        with:
+          name: fev-gfc17-fixed-input
+          path: fev_input
+          run-id: 33262348097
+          github-token: ${{ github.token }}
       - name: Restore same-run partial cache
         uses: actions/download-artifact@v4
         continue-on-error: true
