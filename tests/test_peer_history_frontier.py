@@ -8,15 +8,13 @@ from research.peer_history_frontier import (
     diagnostic_retention_auc,
     make_config_grid,
     pareto_frontier,
+    run_frontier_experiment,
 )
 from research.peer_history_frontier_fev import prepare_fev_rossmann_weekly_frame
 
 
 def test_center_rows_removes_full_constant_level_shift():
-    base = np.array([
-        [1.0, 1.2, 0.9, 1.1],
-        [2.0, 2.3, 1.8, 2.1],
-    ])
+    base = np.array([[1.0, 1.2, 0.9, 1.1], [2.0, 2.3, 1.8, 2.1]])
     shifted = base + np.log(0.90)
     np.testing.assert_allclose(center_rows(base), center_rows(shifted), atol=1e-12)
 
@@ -76,20 +74,10 @@ def test_pareto_frontier_maximizes_gain_and_minimizes_diagnostic_error():
     front = pareto_frontier(frame)
     assert set(front["config_id"]) == {"A", "B", "C", "D"}
     dominated = pd.concat(
-        [
-            frame,
-            pd.DataFrame(
-                {
-                    "config_id": ["E"],
-                    "comparability_gain_pct": [7.0],
-                    "diagnostic_error_auc": [0.30],
-                }
-            ),
-        ],
+        [frame, pd.DataFrame({"config_id": ["E"], "comparability_gain_pct": [7.0], "diagnostic_error_auc": [0.30]})],
         ignore_index=True,
     )
-    front2 = pareto_frontier(dominated)
-    assert "E" not in set(front2["config_id"])
+    assert "E" not in set(pareto_frontier(dominated)["config_id"])
 
 
 def test_prepare_fev_weekly_uses_pre_eval_history_and_non_outcome_context():
@@ -124,3 +112,45 @@ def test_prepare_fev_weekly_uses_pre_eval_history_and_non_outcome_context():
     assert data["context_feature_count"] >= 7
     assert data["date_range"]["history_end"] == "2020-02-09"
     assert data["date_range"]["eval_start"] == "2020-02-16"
+
+
+def test_screening_gate_kills_when_history_adds_no_comparability_information():
+    n, weeks = 24, 12
+    latent = np.linspace(0.0, 2.3, n)
+    data = {
+        "ids": np.arange(1, n + 1),
+        "perf_raw": np.zeros((n, weeks), dtype=float),
+        "y_eval": latent,
+        "context_dist": np.abs(latent[:, None] - latent[None, :]),
+        "context_feature_count": 1,
+    }
+    result = run_frontier_experiment(
+        data,
+        k=3,
+        deltas=[0.10],
+        contam_fracs=[0.0, 0.25, 0.50, 0.75, 1.0],
+    )
+    assert result["verdict"]["screening_verdict"] == "KILL_OR_REDESIGN"
+    assert result["verdict"]["max_comparability_gain_pct"] < 5.0
+
+
+def test_screening_gate_survives_when_history_buys_comparability_at_diagnostic_cost():
+    n, weeks = 40, 12
+    latent = np.linspace(8.0, 10.0, n)
+    season = 0.04 * np.sin(np.linspace(0.0, 2.0 * np.pi, weeks, endpoint=False))
+    data = {
+        "ids": np.arange(1, n + 1),
+        "perf_raw": latent[:, None] + season[None, :],
+        "y_eval": latent + 0.02,
+        "context_dist": np.zeros((n, n), dtype=float),
+        "context_feature_count": 0,
+    }
+    result = run_frontier_experiment(
+        data,
+        k=5,
+        deltas=[0.10],
+        contam_fracs=[0.0, 0.25, 0.50, 0.75, 1.0],
+    )
+    assert result["verdict"]["screening_verdict"] == "FRONTIER_SURVIVE"
+    assert result["verdict"]["max_comparability_gain_pct"] >= 5.0
+    assert result["verdict"]["nontrivial_pareto_frontier"] is True
