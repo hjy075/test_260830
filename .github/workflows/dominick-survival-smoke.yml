@@ -1,0 +1,283 @@
+name: dominick-survival-smoke
+
+on:
+  push:
+    branches:
+      - tmp-dominick-survival-smoke-20260830
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -q pandas numpy scipy scikit-learn pyreadr
+      - name: Download public Dominick data
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 3 -o dominick.rda https://raw.githubusercontent.com/rstudio/academyDatasets/main/data/dominick.rda
+          curl -fL --retry 3 -o stores.csv https://raw.githubusercontent.com/eurostat/dff/master/CSV/stores.csv
+          ls -lh dominick.rda stores.csv
+      - name: Run survival-conditioned benchmark smoke test
+        run: |
+          cat > /tmp/run_smoke.py <<'PY'
+          import json, math, warnings
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+          import pyreadr
+          from scipy.stats import spearmanr
+          from sklearn.preprocessing import StandardScaler
+          from sklearn.neighbors import NearestNeighbors
+
+          warnings.filterwarnings('ignore')
+          rng = np.random.default_rng(20260830)
+
+          r = pyreadr.read_r('dominick.rda')
+          if not r:
+              raise RuntimeError('RDA contained no objects')
+          key = list(r.keys())[0]
+          df = r[key].copy()
+          print('RDA_KEY', key)
+          print('SHAPE', df.shape)
+          print('COLS', list(df.columns))
+
+          # Normalize key columns.
+          lower = {c.lower(): c for c in df.columns}
+          store_col = lower.get('store') or lower.get('store_id')
+          date_col = lower.get('date')
+          cust_col = lower.get('custcoun') or lower.get('customer_count')
+          if store_col is None or date_col is None:
+              raise RuntimeError(f'Missing store/date columns: {list(df.columns)}')
+          df[store_col] = pd.to_numeric(df[store_col], errors='coerce').astype('Int64')
+          df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+          df = df.dropna(subset=[store_col, date_col]).copy()
+          df[store_col] = df[store_col].astype(int)
+
+          # Department-dollar fields: numeric measures other than store, customer count, and coupon/count-like fields.
+          numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+          exclude_tokens = ('store','cust','count','coup','week','year','month','day')
+          sales_cols = [c for c in numeric if c != store_col and not any(tok in c.lower() for tok in exclude_tokens)]
+          if len(sales_cols) < 5:
+              raise RuntimeError(f'Could not identify department sales columns; numeric={numeric}')
+          print('SALES_COLS', sales_cols)
+          df['total_sales'] = df[sales_cols].fillna(0).sum(axis=1)
+          if cust_col is not None:
+              df['cust'] = pd.to_numeric(df[cust_col], errors='coerce')
+          else:
+              df['cust'] = np.nan
+
+          # Week-level panel. A good week has at least 4 reporting days.
+          df['week'] = df[date_col].dt.to_period('W-SUN').dt.start_time
+          agg_spec = days=(date_col, 'nunique'), total_sales=('total_sales','sum'), cust=('cust','sum')
+          wk = df.groupby([store_col,'week'], as_index=False).agg(**agg_spec)
+          # department shares/features
+          dept_w = df.groupby([store_col,'week'], as_index=False)[sales_cols].sum()
+          wk = wk.merge(dept_w, on=[store_col,'week'], how='left')
+          wk['good'] = wk['days'] >= 4
+          good = wk[wk['good']].copy()
+          gmin, gmax = good['week'].min(), good['week'].max()
+          print('GLOBAL_WEEK_RANGE', str(gmin.date()), str(gmax.date()))
+          print('N_STORES_GOOD', good[store_col].nunique())
+
+          endpoints = good.groupby(store_col).agg(
+              first_week=('week','min'), last_week=('week','max'), n_good_weeks=('week','nunique'),
+              mean_week_sales=('total_sales','mean'), mean_week_cust=('cust','mean')
+          ).reset_index().rename(columns={store_col:'store'})
+
+          # Historical metadata marks stores eventually recorded as Closed. This is supporting evidence only,
+          # not a precise closure date.
+          stores = pd.read_csv('stores.csv', header=None, names=['store','city','price_tier','zone','zip','address'])
+          stores['store'] = pd.to_numeric(stores['store'], errors='coerce').astype('Int64')
+          stores['metadata_closed'] = stores['address'].astype(str).str.strip().str.lower().eq('closed')
+          endpoints = endpoints.merge(stores[['store','city','metadata_closed']], on='store', how='left')
+          endpoints['early_26w'] = endpoints['last_week'] <= (gmax - pd.Timedelta(weeks=26))
+          endpoints['early_52w'] = endpoints['last_week'] <= (gmax - pd.Timedelta(weeks=52))
+          endpoints['closure_consistent_26w'] = endpoints['early_26w'] & endpoints['metadata_closed'].fillna(False)
+          endpoints.to_csv('dominick_store_endpoints.csv', index=False)
+          print('EARLY_EXIT_COUNTS', json.dumps({
+              'early_26w': int(endpoints.early_26w.sum()),
+              'early_52w': int(endpoints.early_52w.sum()),
+              'metadata_closed': int(endpoints.metadata_closed.fillna(False).sum()),
+              'closure_consistent_26w': int(endpoints.closure_consistent_26w.sum()),
+          }))
+          print('EARLY_EXIT_SAMPLE')
+          print(endpoints[endpoints.early_26w].sort_values('last_week').head(30).to_string(index=False))
+
+          # Build a feature matrix at a cutoff from trailing 26 weeks. Matching intentionally excludes
+          # focal total-sales level; it uses traffic dynamics and department mix to approximate store type/scale.
+          def snapshot(cutoff, horizon_weeks=26, k=8):
+              pre0 = cutoff - pd.Timedelta(weeks=26)
+              recent0 = cutoff - pd.Timedelta(weeks=4)
+              target = cutoff + pd.Timedelta(weeks=horizon_weeks)
+              pre = good[(good.week >= pre0) & (good.week < cutoff)].copy()
+              recent = good[(good.week >= recent0) & (good.week < cutoff)]
+              counts = pre.groupby(store_col).week.nunique()
+              recent_counts = recent.groupby(store_col).week.nunique()
+              risk = sorted(set(counts[counts >= 18].index) & set(recent_counts[recent_counts >= 2].index))
+              if len(risk) < 25:
+                  return None
+              last_map = endpoints.set_index('store').last_week.to_dict()
+              survivors = [s for s in risk if last_map.get(s, pd.Timestamp.min) >= target]
+              exits = [s for s in risk if last_map.get(s, pd.Timestamp.max) < target]
+              if len(exits) < 3 or len(survivors) < max(20, k+3):
+                  return None
+
+              p = pre[pre[store_col].isin(risk)].copy()
+              base = p.groupby(store_col).agg(
+                  y=('total_sales','mean'),
+                  cust_mean=('cust','mean'), cust_sd=('cust','std'),
+                  sales_sd=('total_sales','std'), nweek=('week','nunique')
+              )
+              base['cust_cv'] = base.cust_sd / base.cust_mean.replace(0,np.nan)
+              base['sales_cv'] = base.sales_sd / base.y.replace(0,np.nan)
+              dmean = p.groupby(store_col)[sales_cols].mean()
+              dshare = dmean.div(dmean.sum(axis=1).replace(0,np.nan), axis=0).add_prefix('share_')
+              feat = base[['cust_mean','cust_cv','sales_cv']].join(dshare)
+              feat = feat.replace([np.inf,-np.inf],np.nan)
+              feat = feat.fillna(feat.median(numeric_only=True)).fillna(0)
+              feat = feat.loc[risk]
+              X = StandardScaler().fit_transform(feat)
+              Xdf = pd.DataFrame(X, index=feat.index)
+              y = base.loc[risk,'y'].to_dict()
+
+              def benchmarks(candidate_stores, focal_stores):
+                  cand = list(candidate_stores)
+                  out = {}
+                  for s in focal_stores:
+                      choices = [j for j in cand if j != s]
+                      kk = min(k, len(choices))
+                      if kk < 3:
+                          out[s] = np.nan; continue
+                      xv = Xdf.loc[s].values
+                      mat = Xdf.loc[choices].values
+                      dist = np.sqrt(((mat-xv)**2).sum(axis=1))
+                      idx = np.argsort(dist)[:kk]
+                      peers = [choices[ii] for ii in idx]
+                      # robust mean: simple median of peer weekly-sales levels
+                      out[s] = float(np.median([y[j] for j in peers]))
+                  return out
+
+              focal = survivors[:]  # evaluate stores that remain observable at horizon
+              b_risk = benchmarks(risk, focal)
+              b_surv = benchmarks(survivors, focal)
+              rows=[]
+              for s in focal:
+                  br, bs = b_risk[s], b_surv[s]
+                  yi = y[s]
+                  if not (np.isfinite(br) and np.isfinite(bs) and br>0 and bs>0 and yi>0):
+                      continue
+                  gr = math.log(yi/br); gs = math.log(yi/bs)
+                  rows.append((s,yi,br,bs,gr,gs))
+              rr = pd.DataFrame(rows,columns=['store','y','b_risk','b_surv','g_risk','g_surv'])
+              if len(rr) < 15:
+                  return None
+              rr['bench_shift'] = np.log(rr.b_surv/rr.b_risk)
+              rr['label_risk'] = rr.g_risk < math.log(0.90)
+              rr['label_surv'] = rr.g_surv < math.log(0.90)
+              label_flip = float((rr.label_risk != rr.label_surv).mean())
+              rho = float(spearmanr(rr.g_risk, rr.g_surv).statistic)
+              n20 = max(1, int(math.ceil(.2*len(rr))))
+              a=set(rr.nsmallest(n20,'g_risk').store); b=set(rr.nsmallest(n20,'g_surv').store)
+              jacc = len(a&b)/len(a|b)
+              actual = {
+                  'med_signed_shift': float(rr.bench_shift.median()),
+                  'med_abs_shift': float(rr.bench_shift.abs().median()),
+                  'p90_abs_shift': float(rr.bench_shift.abs().quantile(.90)),
+                  'label_flip': label_flip,
+                  'spearman': rho,
+                  'bottom20_jaccard': float(jacc),
+              }
+
+              # Falsification: remove the same number of stores at random from the risk-set candidate universe.
+              null=[]
+              for _ in range(250):
+                  removed=set(rng.choice(risk,size=len(exits),replace=False).tolist())
+                  rand_surv=[s for s in risk if s not in removed]
+                  brnd=benchmarks(rand_surv,focal)
+                  vals=[]
+                  for _, row in rr.iterrows():
+                      s=int(row.store); bx=brnd.get(s,np.nan)
+                      if np.isfinite(bx) and bx>0:
+                          vals.append((s, math.log(bx/row.b_risk), math.log(row.y/bx)))
+                  if len(vals)<10: continue
+                  nd=pd.DataFrame(vals,columns=['store','shift','g'])
+                  joined=rr[['store','g_risk']].merge(nd,on='store')
+                  null.append({
+                      'med_abs_shift': float(joined['shift'].abs().median()),
+                      'label_flip': float(((joined.g_risk < math.log(.90)) != (joined.g < math.log(.90))).mean()),
+                      'spearman': float(spearmanr(joined.g_risk,joined.g).statistic),
+                  })
+              nul=pd.DataFrame(null)
+              p_shift=float((nul.med_abs_shift >= actual['med_abs_shift']).mean()) if len(nul) else np.nan
+              p_flip=float((nul.label_flip >= actual['label_flip']).mean()) if len(nul) else np.nan
+              p_rho=float((nul.spearman <= actual['spearman']).mean()) if len(nul) else np.nan
+              summ={
+                  'cutoff': str(cutoff.date()), 'target': str(target.date()),
+                  'n_risk':len(risk),'n_survivors':len(survivors),'n_exits':len(exits),'n_focal':len(rr),
+                  **actual,
+                  'null_p_med_abs_shift':p_shift,'null_p_label_flip':p_flip,'null_p_spearman':p_rho,
+                  'exit_metadata_closed_share': float(endpoints.set_index('store').loc[exits,'metadata_closed'].fillna(False).mean()) if exits else np.nan,
+              }
+              return summ, rr
+
+          # Search quarterly cutoffs; keep every valid horizon experiment.
+          cutoffs = pd.date_range(gmin + pd.Timedelta(weeks=52), gmax - pd.Timedelta(weeks=30), freq='13W')
+          results=[]; detail=[]
+          for c in cutoffs:
+              z=snapshot(pd.Timestamp(c), horizon_weeks=26, k=8)
+              if z is not None:
+                  s, rr=z; results.append(s); rr['cutoff']=s['cutoff']; detail.append(rr)
+          res=pd.DataFrame(results)
+          res.to_csv('dominick_survival_smoke_results.csv',index=False)
+          if detail:
+              pd.concat(detail,ignore_index=True).to_csv('dominick_survival_smoke_detail.csv',index=False)
+          print('VALID_WINDOWS', len(res))
+          if len(res):
+              print('WINDOW_RESULTS')
+              print(res.to_string(index=False))
+              print('AGG', json.dumps({
+                  'median_n_exits': float(res.n_exits.median()),
+                  'median_med_abs_shift': float(res.med_abs_shift.median()),
+                  'median_label_flip': float(res.label_flip.median()),
+                  'median_spearman': float(res.spearman.median()),
+                  'median_bottom20_jaccard': float(res.bottom20_jaccard.median()),
+                  'share_windows_shift_beyond_random_p05': float((res.null_p_med_abs_shift <= .05).mean()),
+                  'share_windows_flip_beyond_random_p05': float((res.null_p_label_flip <= .05).mean()),
+              }))
+          else:
+              print('DATA_GATE_FAIL: no windows with >=3 panel exits and sufficient survivor support')
+
+          # Human-readable artifact.
+          lines=['# Dominick survival-conditioned benchmark smoke test','',
+                 f'- Data object: `{key}`; rows={len(df):,}; stores={good[store_col].nunique()}',
+                 f'- Good-week range: {gmin.date()} to {gmax.date()}',
+                 f'- Stores ending >=26 weeks before panel end: {int(endpoints.early_26w.sum())}',
+                 f'- Of those, metadata later marked Closed: {int(endpoints.closure_consistent_26w.sum())}',
+                 f'- Valid 26-week horizon windows: {len(res)}','']
+          if len(res):
+              lines += ['## Aggregate smoke metrics','',
+                        f'- Median actual benchmark |log shift|: {res.med_abs_shift.median():.4f}',
+                        f'- Median underperformance-label flip rate: {res.label_flip.median():.3f}',
+                        f'- Median gap rank Spearman: {res.spearman.median():.3f}',
+                        f'- Median bottom-20% Jaccard: {res.bottom20_jaccard.median():.3f}',
+                        f'- Windows where actual attrition shift exceeds random-deletion null at p<=.05: {(res.null_p_med_abs_shift<=.05).sum()}/{len(res)}','']
+          Path('dominick_survival_smoke.md').write_text('\n'.join(lines))
+          PY
+          python /tmp/run_smoke.py | tee dominick_survival_smoke.log
+      - name: Upload smoke outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: dominick-survival-smoke
+          path: |
+            dominick_store_endpoints.csv
+            dominick_survival_smoke_results.csv
+            dominick_survival_smoke_detail.csv
+            dominick_survival_smoke.md
+            dominick_survival_smoke.log
+          if-no-files-found: warn
