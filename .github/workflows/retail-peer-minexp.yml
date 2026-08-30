@@ -1,14 +1,14 @@
 name: Retail Peer Uncertainty Minimum Experiment
 
 on:
-  push:
-    paths:
-      - '.github/workflows/retail-peer-minexp.yml'
+  issues:
+    types: [opened]
   workflow_dispatch:
 
 # Gate-0: peer-definition fragility on Rossmann public data.
 jobs:
   run-minexp:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.issue.title, '[peer-minexp]')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
