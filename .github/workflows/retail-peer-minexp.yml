@@ -6,6 +6,7 @@ on:
       - '.github/workflows/retail-peer-minexp.yml'
   workflow_dispatch:
 
+# Gate-0: peer-definition fragility on Rossmann public data.
 jobs:
   run-minexp:
     runs-on: ubuntu-latest
