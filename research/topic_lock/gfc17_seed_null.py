@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -42,13 +41,9 @@ def exact_cut_indices(n: int, horizon: int = HORIZON, num_windows: int = NUM_WIN
 
 
 def _load_fev_long() -> pd.DataFrame:
-    local_path = os.getenv("FEV_GFC17_PARQUET")
-    if local_path:
-        raw = pd.read_parquet(local_path)
-    else:
-        from datasets import load_dataset
+    from datasets import load_dataset
 
-        raw = load_dataset(DATASET, CONFIG, split="train").to_pandas()
+    raw = load_dataset(DATASET, CONFIG, split="train").to_pandas()
     if raw.empty:
         raise RuntimeError("FEV GFC17 dataset is empty")
     if not isinstance(raw.iloc[0]["timestamp"], (list, tuple, np.ndarray)):
