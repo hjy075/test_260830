@@ -1,12 +1,9 @@
 name: Retail Peer Uncertainty Minimum Experiment
 
 on:
-  issues:
-    types: [opened]
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - 'research/peer-minexp-trigger.txt'
+  workflow_run:
+    workflows: ["Cache FEV GFC17 Input"]
+    types: [completed]
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
@@ -14,7 +11,7 @@ on:
 # Gate-0: peer-definition fragility on Rossmann public data.
 jobs:
   run-minexp:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || startsWith(github.event.issue.title, '[peer-minexp]')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -23,13 +20,16 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install -q pandas numpy scikit-learn
+        run: pip install -q pandas numpy scikit-learn scipy
       - name: Download Rossmann public mirror
         run: |
+          set -euo pipefail
           mkdir -p peer_minexp
           curl -fL --retry 3 -o peer_minexp/train.csv https://raw.githubusercontent.com/ahmedbadr97/Rossmann-Store-Sales/main/dataset/raw/train.csv
           curl -fL --retry 3 -o peer_minexp/store.csv https://raw.githubusercontent.com/ahmedbadr97/Rossmann-Store-Sales/main/dataset/raw/store.csv
           wc -l peer_minexp/train.csv peer_minexp/store.csv
+          test $(wc -c < peer_minexp/train.csv) -gt 30000000
+          test $(wc -c < peer_minexp/store.csv) -gt 40000
       - name: Run minimum experiment
         run: python research/peer_uncertainty_minexp.py
       - name: Upload diagnostics
@@ -40,4 +40,5 @@ jobs:
             peer_minexp/summary.json
             peer_minexp/store_diagnostics.csv
             peer_minexp/gaps_2014.csv
+          if-no-files-found: error
           retention-days: 14
