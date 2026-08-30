@@ -1,3 +1,4 @@
+# retrigger loader contract after installing parquet engine
 import pandas as pd
 import pytest
 
