@@ -1,216 +1,203 @@
-# Peer-History Comparability–Diagnostic Frontier v2
+# Peer-History Objective Misalignment v3
 
 ## Working title
 
-**When Does Performance History Become a Bad Peer Signal?**  
-**The Comparability–Diagnostic Validity Frontier in Retail Peer Benchmarking**
+**When Better Peer Matching Makes Worse Diagnoses**  
+**Dynamic Peer Re-selection and Objective Misalignment in Retail Benchmarking**
 
-한국어 작업 제목: **과거 성과는 언제 좋은 비교 신호에서 나쁜 진단 신호로 바뀌는가? 리테일 Peer Benchmarking의 비교가능성–진단타당성 경계**
+한국어 작업 제목: **더 잘 맞는 유사점포가 더 나쁜 진단을 만들 때: 리테일 벤치마킹의 동적 Peer 재선정과 목적함수 불일치**
 
-## 1. Research question
+## 0. What v3 kills from v2
 
-The study does **not** ask merely whether using historical outcomes in peer construction can attenuate a persistent performance gap. A constant performance-level shift embedded in the history can make attenuation partly mechanical.
+v3 does NOT claim that:
 
-The primary question is therefore:
+1. historical performance improves *structural comparability* merely because it lowers next-period benchmark MAE;
+2. historical performance contamination mechanically lowering shock recovery is itself novel;
+3. better predictive fit failing to imply better downstream decisions is novel;
+4. adaptive baselines absorbing persistent change is novel;
+5. peer selection or endogenous reference groups are novel.
 
-> **How much and what kind of performance history can be used before gains in peer comparability become losses in diagnostic validity?**
+Those claims are either not identified by the proposed data or have strong ancestors in retail benchmarking, reference-group selection, decision-focused learning, and drift-aware anomaly detection.
 
-The target object is a **comparability–diagnostic validity frontier**, not a single best peer algorithm.
+The remaining candidate is narrower: an algorithmic peer benchmark can endogenously move after persistent store deterioration because the focal store's contaminated history changes the peer set. Standard predictive validation can then prefer precisely those peer designs that are most diagnostically fragile.
 
-## 2. Mechanism decomposition
+## 1. Exact mechanism: dynamic peer re-selection
 
-For store `i` and historical period `t`, decompose performance history conceptually as
+For focal store i, let P_i(0) be the clean peer set and B_i(0) its clean peer benchmark. Inject a known persistent negative log-shock of magnitude d > 0, so the evaluation outcome changes from Y_i to Y_i - d.
 
-`H_it = L_i + S_it`,
+Let P_i(c) be the refreshed peer set after fraction c of the peer-construction history has been contaminated by the same deterioration, and let B_i(c) be its benchmark.
 
-where:
+Detected_i(c) = [B_i(c) - (Y_i - d)] - [B_i(0) - Y_i]
+              = d + B_i(c) - B_i(0).
 
-- `L_i`: historical performance **level** (store-specific mean),
-- `S_it`: mean-centered historical **shape** or trajectory.
+Therefore
 
-Peer distance for the decomposed designs is
+R_i(c) = Detected_i(c) / d
+       = 1 + [B_i(c) - B_i(0)] / d.
 
-`D = (1 - alpha) D_context + alpha [beta D_level + (1 - beta) D_shape]`,
+Define Benchmark Absorption Ratio:
 
-where:
+BAR_i(c) = 1 - R_i(c)
+         = [B_i(0) - B_i(c)] / d.
 
-- `alpha` controls the total weight assigned to performance history,
-- `beta` controls how much of that history weight is assigned to level rather than shape.
+Mandatory falsifier:
 
-A raw-trajectory distance is retained as a reference arm because it represents the common, direct use of historical outcomes for similarity.
+- If peers are frozen, P_i(c) = P_i(0), hence B_i(c) = B_i(0), R_i(c) = 1, BAR_i(c) = 0.
+- Any attenuation in the proposed KNN-style design must therefore arise through benchmark movement induced by peer re-selection, not from the focal outcome shock by itself.
 
-## 3. Peer-construction arms
+If the frozen-peer identity fails beyond numerical tolerance, the experiment is wrong.
 
-1. **Context only** — no historical outcome information.
-2. **Level only** — historical mean performance is the outcome-derived signal.
-3. **Shape only** — row-centered history; constant level shifts are removed.
-4. **Level–shape hybrid** — explicit decomposition with varying `beta`.
-5. **Raw trajectory reference** — historical trajectory used without the level/shape decomposition.
+## 2. Peer-turnover decomposition
 
-Primary grid:
+For equal-weight K-nearest-neighbor benchmarks,
 
-- `alpha ∈ {0.00, 0.25, 0.50, 0.75, 1.00}`
-- `beta ∈ {0.00, 0.25, 0.50, 0.75, 1.00}` for decomposed-history designs
-- peer count `K = 15`
+B_i(c) - B_i(0)
+= (1/K) [sum_{j in New_i(c)} Y_j - sum_{j in Dropped_i(c)} Y_j],
 
-## 4. Data and temporal split
+where New_i(c)=P_i(c)\\P_i(0) and Dropped_i(c)=P_i(0)\\P_i(c).
 
-Primary empirical dataset: **Rossmann weekly data (`rossmann_1W`) from the FEV dataset collection**.
+Define
 
-Primary split:
+Turnover_i(c) = 1 - |P_i(c) intersection P_i(0)| / K.
 
-- peer-history window: **24 weeks**
-- evaluation window: **8 weeks immediately after the history window**
-- all peer-construction information must precede the evaluation period
+The empirical mechanism requires:
 
-Context variables are restricted to non-outcome store or operational descriptors available before evaluation. Historical sales are used only in the explicitly labeled history components.
+contaminated history -> peer turnover -> downward benchmark movement -> lower recovery.
 
-## 5. Known-ground-truth intervention
+The algebra makes benchmark movement sufficient for recovery loss; turnover is the selection mechanism that explains where the benchmark movement came from.
 
-For each eligible focal store, inject a known persistent negative performance shock.
+## 3. Replace 'structural comparability' with predictive alignment
 
-Evaluation-period log outcome:
+The v2 clean metric uses future outcomes:
 
-`Y*_i = Y_i + log(1 - delta)`.
+CleanMAE_m = mean_i |B_i^m(0) - Y_i,future|.
 
-The same shock is embedded into the final fraction `q` of the history window when testing contamination.
+This measures out-of-sample predictive benchmark alignment, NOT latent structural comparability. The paper must use that language consistently.
 
-Primary contamination grid:
+PredictiveAlignmentGain_m
+= 100 * (MAE_context - MAE_m) / MAE_context.
 
-- `q ∈ {0.00, 0.25, 0.50, 0.75, 1.00}`
+A structural-comparability claim would require external or semi-synthetic latent ground truth and is not part of the primary empirical claim.
 
-Shock magnitudes:
+## 4. Objective misalignment
 
-- **primary:** `delta = 0.10`
-- robustness: `delta ∈ {0.05, 0.15, 0.20}`
+Let m index candidate peer-information designs.
 
-The injected shock is applied to the focal store used to query the peer system; donor-store histories and donor evaluation outcomes remain unmodified.
+Standard predictive selection chooses
 
-## 6. Metrics
+m_pred = argmin_m CleanMAE_m.
 
-### 6.1 Clean peer comparability
+Diagnostic risk is
 
-For each configuration, construct peers using uncontaminated history and calculate the error between the peer benchmark and the focal store's evaluation-period outcome.
+D_m = integral_c |R_m(c)-1| dc,
 
-Primary clean metric:
+for pre-declared deterioration magnitudes 5%, 10%, and 15% (20% only robustness).
 
-`CleanMAE = mean_i |Benchmark_i - Y_i|`.
+Define useful designs:
 
-Relative comparability gain over context-only:
+M_useful = {m: PredictiveAlignmentGain_m >= max(5 percentage points, 0.5 * max_j PredictiveAlignmentGain_j)}.
 
-`ComparabilityGain = 100 × (MAE_context - MAE_config) / MAE_context`.
+Let
 
-Higher is better.
+m_safe = argmin_{m in M_useful} D_m.
 
-### 6.2 Shock recovery
+Selection Diagnostic Penalty:
 
-Let the known true log-shock magnitude be `T = -log(1 - delta)`.
+SDP = D_{m_pred} - D_{m_safe}.
 
-For each focal store, compare the change in its benchmark gap before and after the injected shock:
+The central question is whether ordinary predictive validation of a retail peer benchmark selects a design with materially larger diagnostic risk than another design retaining substantial predictive value.
 
-`Recovery = DetectedEffect / T`.
+## 5. Primary falsifiable expectations
 
-Interpretation:
+H1 — Predictive value: At least one history-using design produces >=5 percentage-point out-of-sample predictive alignment gain relative to context-only.
 
-- `Recovery = 1`: correct diagnosis,
-- `Recovery < 1`: attenuation / hidden underperformance,
-- `Recovery > 1`: amplification / over-diagnosis.
+H2 — Frozen-peer falsifier: frozen-peer recovery equals 1 within numerical tolerance for every shock and contamination level.
 
-### 6.3 Diagnostic Error AUC
+H3 — Dynamic re-selection: contamination increases peer turnover and produces downward benchmark movement for the predictive-selected design; benchmark movement exactly accounts for recovery loss.
 
-Because both attenuation and amplification are diagnostic failures, the primary diagnostic metric is
+H4 — Objective misalignment: the predictive winner has materially larger diagnostic error than a useful safer design, with SDP >= 0.05 AUC as primary screening threshold.
 
-`DiagnosticErrorAUC = normalized integral_q |Recovery(q) - 1| dq`.
+H5 — Operational magnitude: H3-H4 appear at 5%, 10%, and/or 15% deterioration, not only 20%.
 
-Lower is better; zero is ideal.
+H6 — Decision consequence: dynamic re-selection changes false-negative underperformance flags and/or intervention-priority rankings relative to frozen peers or the safer useful design.
 
-`DiagnosticRetentionAUC = integral Recovery(q) dq` is retained only as a secondary descriptive metric because values above 1 can otherwise look artificially favorable.
+## 6. Primary empirical design
 
-### 6.4 Pareto frontier
+Primary dataset: Rossmann weekly retail panel from the public FEV collection.
 
-A peer configuration is Pareto-dominated if another configuration has:
+- history H=24 weeks
+- evaluation E=8 weeks
+- K=15 peers
+- shock delta = 5%, 10%, 15%; 20% robustness only
+- contamination c = 0%, 25%, 50%, 75%, 100%
+- history weights alpha = 0, .25, .50, .75, 1
+- level/shape shares beta = 0, .25, .50, .75, 1
+- raw-trajectory arm retained only as a reference
 
-- equal or greater `ComparabilityGain`, and
-- equal or lower `DiagnosticErrorAUC`,
-- with at least one strict improvement.
+All donor histories and donor evaluation outcomes remain clean. Only the focal query store receives the known shock. This isolates how focal history changes its reference set.
 
-The empirical object of interest is the nondominated **comparability–diagnostic validity frontier**.
+## 7. Rolling-origin requirement
 
-## 7. Primary hypotheses / falsifiable expectations
+A single terminal split is insufficient. Primary evidence should aggregate at least four pre-declared rolling cutoffs separated by approximately one quarter where data allow.
 
-### H1 — History can provide genuine comparability value
+For each cutoff, construct peers using only information available before its evaluation window. Report pooled results and cutoff-level dispersion.
 
-At least one history-using configuration should improve clean benchmark comparability relative to context-only.
+KILL if objective misalignment is driven by one cutoff or flips direction in most other cutoffs.
 
-### H2 — Outcome level is the principal contamination channel for persistent level deterioration
+## 8. Stronger primary gates
 
-As historical contamination increases, designs assigning more weight to performance **level** should generally suffer larger diagnostic error than otherwise comparable shape-heavy designs.
+### KILL 1 — No predictive value
+Max history-based PredictiveAlignmentGain < 5 percentage points across rolling origins.
 
-This is an empirical expectation, not an identity: partial contamination can alter trajectory shape, so shape-only designs are not assumed to be immune.
+### KILL 2 — Frozen control fails
+Mean absolute frozen-peer recovery error > 1e-8 or the benchmark-movement decomposition fails numerical closure.
 
-### H3 — There is no universally dominant information design
+### KILL 3 — No dynamic diagnostic harm
+Among useful history designs, 10% shock DiagnosticErrorAUC < 0.10 and no >=10 percentage-point recovery deviation at c=50% or 100%.
 
-If the trade-off is substantive, increasing historical-outcome information should create configurations with better clean comparability but worse diagnostic validity, producing a nontrivial Pareto frontier.
+### KILL 4 — No objective misalignment
+SDP < 0.05, or the safer design retains <50% of maximum predictive alignment gain.
 
-### H4 — The trade-off exists at operationally plausible shock sizes
+### KILL 5 — No selection mechanism
+Recovery falls but peer turnover/benchmark movement do not move in the predicted direction.
 
-The effect should be visible at **5–15%** deterioration, not only at the 20% robustness condition.
+### KILL 6 — Only extreme shock
+Effects appear only at 20% deterioration, not 5-15%.
 
-## 8. Pre-declared screening gates
+### KILL 7 — Rolling-origin collapse
+The central pattern is not directionally stable across pre-declared cutoffs.
 
-The primary `H=24, K=15, delta=10%` experiment is judged before any sensitivity expansion.
+### KILL 8 — Design sensitivity collapse
+After primary survival, the qualitative result disappears for reasonable H in {12,24,52} or K in {5,15,30} rather than merely changing magnitude.
 
-### KILL / REDESIGN 1 — No material comparability benefit
+### KILL 9 — No decision consequence
+Realistic underperformance thresholds and top-N intervention rankings are essentially unchanged. Managerial contribution must then be sharply downgraded.
 
-If the maximum clean comparability improvement from adding history is **< 5%**, the intended trade-off is weak. The study risks reducing to 'a bad variable hurts diagnosis.'
+## 9. Mandatory controls
 
-### KILL / REDESIGN 2 — No material diagnostic cost
-
-Among configurations with at least 5% comparability gain, if contamination does not create at least one material diagnostic deviation (approximately **10 percentage points** in recovery or `DiagnosticErrorAUC >= 0.10`), the practical trade-off is weak.
-
-### KILL / REDESIGN 3 — Frontier collapses
-
-If a single information design essentially dominates the alternatives, there is little evidence for a meaningful comparability–diagnostic frontier.
-
-### KILL / REDESIGN 4 — Only extreme shocks work
-
-If the trade-off appears only at `delta = 20%` but not at **5%, 10%, or 15%**, the empirical story is considered too fragile for the proposed claim.
-
-### KILL / REDESIGN 5 — Sensitivity collapse
-
-Only after the primary experiment survives, repeat across selected history lengths and K values. If the qualitative frontier disappears under reasonable alternatives, the claim must be narrowed or killed.
-
-## 9. Stage-gated robustness plan
-
-Robustness is intentionally **not** run before the primary gate to avoid searching a large specification space for a favorable result.
-
-If the primary gate survives:
-
-### Stage 2A — Design sensitivity
-
-- history length: `H ∈ {12, 24, 52}` weeks
-- peer count: `K ∈ {5, 15, 30}`
-
-### Stage 2B — Deterioration shape
-
-Primary injection is a step shock. Add a gradual/ramp deterioration condition because real store deterioration may emerge progressively within the history window.
-
-### Stage 2C — Data-construction replication
-
-Replicate the core result on the daily Rossmann source, if execution infrastructure permits, to verify that the weekly FEV representation is not driving the conclusion.
+1. Context-only peer design.
+2. Frozen-peer version of every dynamic design.
+3. History-level-only arm.
+4. Centered-shape-only arm.
+5. Level/shape hybrids.
+6. Raw-history reference arm.
+7. Multiple rolling origins.
+8. Fixed donor pool; focal-only intervention.
+9. Threshold/ranking decision analysis.
 
 ## 10. Interpretation constraints
 
-1. Synthetic experiments are **design validation only**, not empirical evidence for Rossmann.
-2. A decreasing recovery curve under raw level matching is not by itself a novel result; part of it can follow mechanically from matching on a contaminated outcome level.
-3. The contribution must come from characterizing the **value–harm frontier**, identifying which historical components drive it, and showing its practical magnitude under realistic conditions.
-4. Do not claim that historical outcomes should never be used for peer construction.
-5. Do not claim that shape-only history is universally safe.
-6. Do not claim that peer selection, performance-based clustering, or outcome-guided similarity is itself novel.
-7. The empirical topic is not locked until the primary real-data frontier survives the pre-declared gates.
+- Do not call lower future MAE 'structural comparability'.
+- Do not claim historical outcomes should never be used.
+- Do not claim dynamic peers are inherently bad.
+- Do not claim objective misalignment itself is novel; decision-focused learning is an explicit ancestor.
+- Do not claim adaptive-reference contamination itself is novel; concept-drift/anomaly-detection work is an explicit ancestor.
+- Do not claim endogenous reference selection is novel; organizational reference-group work is an explicit ancestor.
+- The contribution, if it survives, is the retail peer-benchmarking mechanism connecting predictive model selection, focal-history contamination, algorithmic peer re-selection, benchmark absorption, and downstream underperformance decisions.
 
 ## 11. Decision labels
 
-- `FRONTIER_SURVIVE`: primary real-data evidence meets the preregistered screening gates.
-- `KILL_OR_REDESIGN`: one or more primary gates fail.
-- `TOPIC_LOCK`: **not implied** by `FRONTIER_SURVIVE`; requires robustness and literature re-attack after the empirical result is known.
+- KILL: any hard gate fails with no defensible narrower claim.
+- REDESIGN: mechanism survives but objective-misalignment or decision-consequence claim fails.
+- V3_SURVIVE: all primary gates survive on real retail data across rolling origins.
+- TOPIC_LOCK: only after V3_SURVIVE, design sensitivity, and a post-result literature re-attack.
