@@ -6,6 +6,8 @@ on:
     paths:
       - 'research/peer_history_falsification.py'
       - '.github/workflows/retail-peer-minexp.yml'
+  pull_request:
+    branches: [main]
   workflow_run:
     workflows: ["Cache FEV GFC17 Input"]
     types: [completed]
@@ -17,7 +19,7 @@ on:
 # Gate-0B: performance-history contamination and injected-shock attenuation.
 jobs:
   run-minexp:
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
