@@ -1,6 +1,11 @@
 name: Retail Peer Uncertainty Minimum Experiment
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/dominick_survival_smoke.py'
+      - '.github/workflows/retail-peer-minexp.yml'
   workflow_run:
     workflows: ["Cache FEV GFC17 Input"]
     types: [completed]
@@ -46,7 +51,7 @@ jobs:
           retention-days: 14
 
   dominick-survival-smoke:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
