@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
+# Gate-0 RED contract: this test file intentionally lands before the implementation.
 MODULE_PATH = Path("research/walmart_peer_history_gate0.py")
 
 
