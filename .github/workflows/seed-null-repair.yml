@@ -1,0 +1,96 @@
+name: Seed Null Surgical Repair
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repair-and-aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      PYTHONPATH: .
+      FEV_GFC17_PARQUET: fev_input/proenfo_gfc17.parquet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas numpy scikit-learn datasets pyarrow
+      - name: Download historical seed shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: oracle-shard-*
+          path: downloaded_shards
+          run-id: 33261024617
+          github-token: ${{ github.token }}
+      - name: Download fixed FEV input
+        uses: actions/download-artifact@v4
+        with:
+          name: fev-gfc17-fixed-input
+          path: fev_input
+          run-id: 33262348097
+          github-token: ${{ github.token }}
+      - name: Repair missing shard if necessary
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          import research.topic_lock.gfc17_seed_null as s
+
+          seeds=[20260829,11,29,47,83,131,173,211,257,307,353,401,449,503,557,601,653,701,751,809,857,907,953,1009,1061]
+          expected={(seed,zi) for seed in seeds for zi in range(8)}
+          root=Path('downloaded_shards')
+          existing=set()
+          for p in root.rglob('seed_*_zone_*.csv'):
+              m=re.fullmatch(r'seed_(\d+)_zone_(\d+)\.csv',p.name)
+              if m: existing.add((int(m.group(1)),int(m.group(2))))
+          missing=sorted(expected-existing)
+          print('existing',len(existing),'missing',missing)
+          if len(existing)==200 and not missing:
+              print('all shards already present; no repair needed')
+          elif len(existing)==199 and len(missing)==1:
+              seed,zi=missing[0]
+              full=s._load_fev_long(); zones=sorted(full['id'].astype(str).unique()); zone=zones[zi]
+              filtered=full[full['id'].astype(str)==zone].copy(); s._load_fev_long=lambda: filtered
+              result=s.run_oracle_seed(seed)
+              if len(result)!=s.NUM_WINDOWS*3: raise SystemExit(f'incomplete repaired shard {len(result)}')
+              d=root/f'oracle-shard-{seed}-{zi}'; d.mkdir(parents=True,exist_ok=True)
+              result.to_csv(d/f'seed_{seed}_zone_{zi}.csv',index=False)
+              (d/'zone.txt').write_text(zone,encoding='utf-8')
+              print('repaired',seed,zi,zone,len(result))
+          else:
+              raise SystemExit(f'unexpected coverage existing={len(existing)} missing={missing}')
+          PY
+      - name: Reassemble and aggregate 24 alternate seeds
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+          files=sorted(Path('downloaded_shards').rglob('seed_*_zone_*.csv'))
+          if len(files)!=200: raise SystemExit(f'files={len(files)} expected=200')
+          all_df=pd.concat([pd.read_csv(p) for p in files],ignore_index=True)
+          combined=Path('combined_seeds'); combined.mkdir(exist_ok=True)
+          if all_df['seed'].nunique()!=25: raise SystemExit('seed coverage !=25')
+          for seed,g in all_df.groupby('seed',sort=True):
+              if len(g)!=480 or g['zone'].nunique()!=8 or g['window'].nunique()!=20 or g['model'].nunique()!=3: raise SystemExit(f'seed {seed} incomplete')
+              if g.duplicated(['zone','window','model']).any(): raise SystemExit(f'seed {seed} duplicate')
+              g.to_csv(combined/f'seed_{int(seed)}.csv',index=False)
+          print('complete rows',len(all_df))
+          PY
+          python -m research.topic_lock.gfc17_seed_null aggregate --input-dir combined_seeds --outdir seed_null_final
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('seed_null_final/seed_null_gate.json').read_text())
+          if r['alternate_seed_count']!=24 or not r['eligible_for_final_g3']: raise SystemExit(r)
+          print(json.dumps(r,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seed-null-final-results
+          path: seed_null_final/
+          retention-days: 90
