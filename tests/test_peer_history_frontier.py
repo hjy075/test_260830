@@ -8,8 +8,8 @@ from research.peer_history_frontier import (
     diagnostic_retention_auc,
     make_config_grid,
     pareto_frontier,
-    prepare_fev_rossmann_weekly_frame,
 )
+from research.peer_history_frontier_fev import prepare_fev_rossmann_weekly_frame
 
 
 def test_center_rows_removes_full_constant_level_shift():
@@ -32,16 +32,9 @@ def test_compose_distance_has_interpretable_endpoints():
     context = np.array([[0.0, 1.0], [1.0, 0.0]])
     level = np.array([[0.0, 2.0], [2.0, 0.0]])
     shape = np.array([[0.0, 3.0], [3.0, 0.0]])
-
-    np.testing.assert_allclose(
-        compose_distance(context, level, shape, alpha=0.0, level_share=0.5), context
-    )
-    np.testing.assert_allclose(
-        compose_distance(context, level, shape, alpha=1.0, level_share=1.0), level
-    )
-    np.testing.assert_allclose(
-        compose_distance(context, level, shape, alpha=1.0, level_share=0.0), shape
-    )
+    np.testing.assert_allclose(compose_distance(context, level, shape, alpha=0.0, level_share=0.5), context)
+    np.testing.assert_allclose(compose_distance(context, level, shape, alpha=1.0, level_share=1.0), level)
+    np.testing.assert_allclose(compose_distance(context, level, shape, alpha=1.0, level_share=0.0), shape)
     np.testing.assert_allclose(
         compose_distance(context, level, shape, alpha=1.0, level_share=0.25),
         0.25 * level + 0.75 * shape,
@@ -82,7 +75,6 @@ def test_pareto_frontier_maximizes_gain_and_minimizes_diagnostic_error():
     )
     front = pareto_frontier(frame)
     assert set(front["config_id"]) == {"A", "B", "C", "D"}
-
     dominated = pd.concat(
         [
             frame,
