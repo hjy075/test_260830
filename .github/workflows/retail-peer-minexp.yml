@@ -8,7 +8,9 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
-# Gate-0: peer-definition fragility on Rossmann public data.
+permissions:
+  contents: write
+
 jobs:
   run-minexp:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
@@ -41,4 +43,63 @@ jobs:
             peer_minexp/store_diagnostics.csv
             peer_minexp/gaps_2014.csv
           if-no-files-found: error
+          retention-days: 14
+
+  dominick-survival-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check whether result already exists
+        id: gate
+        shell: bash
+        run: |
+          if [ -f research/survival_results/dominick_survival_smoke_results.csv ]; then echo 'needed=false' >> "$GITHUB_OUTPUT"; else echo 'needed=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.needed == 'true'
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        if: steps.gate.outputs.needed == 'true'
+        run: pip install -q pandas numpy scipy scikit-learn pyreadstat
+      - name: Download official Dominick department-sales data
+        if: steps.gate.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          curl -fL --retry 4 -o ccount_stata.zip https://www.chicagobooth.edu/boothsitecore/docs/dff/store-demos-customer-count/ccount_stata.zip
+          mkdir -p dominick_raw
+          unzip -q ccount_stata.zip -d dominick_raw
+          find dominick_raw -maxdepth 3 -type f -printf '%p %s\n'
+          curl -fL --retry 4 -o stores.csv https://raw.githubusercontent.com/eurostat/dff/master/CSV/stores.csv
+      - name: Run survivor-universe smoke
+        if: steps.gate.outputs.needed == 'true'
+        run: python research/dominick_survival_smoke.py | tee dominick_survival_smoke.log
+      - name: Persist result snapshot
+        if: steps.gate.outputs.needed == 'true'
+        shell: bash
+        run: |
+          mkdir -p research/survival_results
+          cp dominick_store_endpoints.csv research/survival_results/
+          cp dominick_survival_smoke_results.csv research/survival_results/
+          [ ! -f dominick_survival_smoke_detail.csv ] || cp dominick_survival_smoke_detail.csv research/survival_results/
+          cp dominick_survival_smoke.md research/survival_results/
+          cp dominick_survival_smoke.log research/survival_results/
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add research/survival_results
+          git commit -m 'results: Dominick survival benchmark smoke' || exit 0
+          git push
+      - name: Upload Dominick diagnostics
+        if: steps.gate.outputs.needed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dominick-survival-smoke
+          path: |
+            dominick_store_endpoints.csv
+            dominick_survival_smoke_results.csv
+            dominick_survival_smoke_detail.csv
+            dominick_survival_smoke.md
+            dominick_survival_smoke.log
+          if-no-files-found: warn
           retention-days: 14
