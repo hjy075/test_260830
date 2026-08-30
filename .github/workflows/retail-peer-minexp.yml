@@ -1,6 +1,11 @@
 name: Retail Peer Uncertainty Minimum Experiment
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/peer_history_falsification.py'
+      - '.github/workflows/retail-peer-minexp.yml'
   workflow_run:
     workflows: ["Cache FEV GFC17 Input"]
     types: [completed]
@@ -8,19 +13,20 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
-# Gate-0: peer-definition fragility on Rossmann public data.
+# Gate-0A: peer-definition fragility on Rossmann public data.
+# Gate-0B: performance-history contamination and injected-shock attenuation.
 jobs:
   run-minexp:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install -q pandas numpy scikit-learn scipy
+        run: pip install -q pandas numpy scikit-learn scipy tabulate
       - name: Download Rossmann public mirror
         run: |
           set -euo pipefail
@@ -30,8 +36,17 @@ jobs:
           wc -l peer_minexp/train.csv peer_minexp/store.csv
           test $(wc -c < peer_minexp/train.csv) -gt 30000000
           test $(wc -c < peer_minexp/store.csv) -gt 40000
-      - name: Run minimum experiment
+      - name: Run peer-definition fragility Gate-0
         run: python research/peer_uncertainty_minexp.py
+      - name: Run performance-history contamination Gate-0
+        run: |
+          python research/peer_history_falsification.py \
+            --train peer_minexp/train.csv \
+            --store peer_minexp/store.csv \
+            --outdir peer_minexp/history_contamination \
+            --k 15 \
+            --history-weeks 24 \
+            --eval-weeks 8
       - name: Upload diagnostics
         uses: actions/upload-artifact@v4
         with:
@@ -40,5 +55,10 @@ jobs:
             peer_minexp/summary.json
             peer_minexp/store_diagnostics.csv
             peer_minexp/gaps_2014.csv
+            peer_minexp/history_contamination/SUMMARY.md
+            peer_minexp/history_contamination/verdict.json
+            peer_minexp/history_contamination/clean_comparability.csv
+            peer_minexp/history_contamination/shock_recovery_summary.csv
+            peer_minexp/history_contamination/shock_recovery_detail.csv
           if-no-files-found: error
           retention-days: 14
