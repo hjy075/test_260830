@@ -1,4 +1,4 @@
-# retrigger loader contract after installing parquet engine
+# trigger loader contract through merge after installing parquet engine
 import pandas as pd
 import pytest
 
