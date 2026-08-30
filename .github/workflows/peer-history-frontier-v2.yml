@@ -1,0 +1,82 @@
+name: Peer History Frontier V2
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'research/peer_history_frontier.py'
+      - 'research/peer_history_frontier_fev.py'
+      - 'tests/test_peer_history_frontier.py'
+      - '.github/workflows/peer-history-frontier-v2.yml'
+
+jobs:
+  primary-frontier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -q numpy pandas scikit-learn pyarrow pytest tabulate
+
+      - name: Run frontier unit tests
+        run: PYTHONPATH=. pytest -q tests/test_peer_history_frontier.py
+
+      - name: Download FEV Rossmann weekly dataset
+        run: |
+          set -euo pipefail
+          mkdir -p peer_minexp/frontier_v2
+          curl -fL --retry 5 --retry-delay 2 \
+            -o peer_minexp/rossmann_1W.parquet \
+            'https://huggingface.co/datasets/autogluon/fev_datasets/resolve/main/rossmann/1W/train-00000-of-00001.parquet'
+          test $(wc -c < peer_minexp/rossmann_1W.parquet) -gt 500000
+
+      - name: Run 24-week / K15 primary frontier
+        run: |
+          PYTHONPATH=. python - <<'PY'
+          from research.peer_history_frontier import run_frontier_experiment, write_results
+          from research.peer_history_frontier_fev import prepare_fev_rossmann_weekly
+
+          data = prepare_fev_rossmann_weekly(
+              'peer_minexp/rossmann_1W.parquet',
+              history_weeks=24,
+              eval_weeks=8,
+          )
+          result = run_frontier_experiment(data, k=15)
+          write_results(
+              result,
+              'peer_minexp/frontier_v2/primary_h24_k15',
+              metadata={
+                  'dataset': 'autogluon/fev_datasets::rossmann_1W',
+                  'history_weeks': 24,
+                  'eval_weeks': 8,
+                  'k': 15,
+                  'date_range': data['date_range'],
+              },
+          )
+          print('=== FRONTIER_V2_PRIMARY ===')
+          print(result['frontier'][[
+              'config_id', 'strategy', 'alpha', 'level_share',
+              'comparability_gain_pct', 'diagnostic_error_auc',
+              'recovery_q50', 'recovery_q100'
+          ]].round(5).to_string(index=False))
+          print(result['verdict'])
+          print('=== END_FRONTIER_V2_PRIMARY ===')
+          PY
+
+      - name: Upload frontier diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: peer-history-frontier-v2-primary
+          path: peer_minexp/frontier_v2/primary_h24_k15/
+          if-no-files-found: error
+          retention-days: 14
+
+# Execution trigger for PR #8 audit.
