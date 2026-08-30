@@ -1,0 +1,45 @@
+name: Walmart Peer-History Gate-0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/walmart_peer_history_gate0.py'
+      - 'tests/test_walmart_peer_history_gate0.py'
+      - '.github/workflows/walmart-peer-history-gate0.yml'
+  workflow_dispatch:
+
+jobs:
+  gate0:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -q pandas numpy pytest tabulate
+      - name: RED/GREEN unit tests
+        run: pytest -q tests/test_walmart_peer_history_gate0.py
+      - name: Download Walmart 45-store weekly panel
+        run: |
+          set -euo pipefail
+          mkdir -p walmart_gate0/input
+          curl -fL --retry 3 \
+            -o walmart_gate0/input/Walmart.csv \
+            https://raw.githubusercontent.com/marcopeix/TimeSeriesForecastingUsingFoundationModels/fa124290d9dd1df3175acc4948dc3227c7e5d2a9/data/Walmart.csv
+          test $(wc -l < walmart_gate0/input/Walmart.csv) -eq 6436
+          head -2 walmart_gate0/input/Walmart.csv
+      - name: Run Walmart Gate-0 and conditional 45-store robustness
+        run: |
+          python research/walmart_peer_history_gate0.py \
+            --data walmart_gate0/input/Walmart.csv \
+            --outdir walmart_gate0/results
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: walmart-peer-history-gate0-results
+          path: walmart_gate0/results
+          if-no-files-found: error
+          retention-days: 14
