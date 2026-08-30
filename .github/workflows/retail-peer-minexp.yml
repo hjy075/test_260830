@@ -64,3 +64,5 @@ jobs:
             peer_minexp/history_contamination/shock_recovery_detail.csv
           if-no-files-found: error
           retention-days: 14
+
+# Baseline rerun requested for peer-history falsification audit on 2026-08-30.
