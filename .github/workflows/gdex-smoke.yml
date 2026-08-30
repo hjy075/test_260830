@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets
+      - run: pip install pytest pandas numpy requests xarray netCDF4 scikit-learn datasets pyarrow
       - run: pytest -q tests/test_gdex_operational_gfs.py tests/test_gdex_sensitivity.py tests/test_seed_null_extended.py
 
   operational-window:
