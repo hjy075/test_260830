@@ -7,6 +7,12 @@ on:
       - 'research/walmart_peer_history_gate0.py'
       - 'tests/test_walmart_peer_history_gate0.py'
       - '.github/workflows/walmart-peer-history-gate0.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/walmart_peer_history_gate0.py'
+      - 'tests/test_walmart_peer_history_gate0.py'
+      - '.github/workflows/walmart-peer-history-gate0.yml'
   workflow_dispatch:
 
 jobs:
