@@ -1,0 +1,38 @@
+name: dominick-pr-survival-smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/dominick_survival_smoke.py'
+      - '.github/workflows/dominick-pr-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q pandas numpy scipy scikit-learn pyreadr
+      - name: Download public data
+        run: |
+          curl -fL --retry 3 -o dominick.rda https://raw.githubusercontent.com/rstudio/academyDatasets/main/data/dominick.rda
+          curl -fL --retry 3 -o stores.csv https://raw.githubusercontent.com/eurostat/dff/master/CSV/stores.csv
+          ls -lh dominick.rda stores.csv
+      - name: Run smoke
+        run: python research/dominick_survival_smoke.py | tee dominick_survival_smoke.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dominick-survival-smoke
+          path: |
+            dominick_store_endpoints.csv
+            dominick_survival_smoke_results.csv
+            dominick_survival_smoke_detail.csv
+            dominick_survival_smoke.md
+            dominick_survival_smoke.log
+          if-no-files-found: warn
+          retention-days: 7
