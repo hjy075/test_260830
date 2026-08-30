@@ -1,0 +1,36 @@
+name: Retail Peer Uncertainty Minimum Experiment
+
+on:
+  push:
+    paths:
+      - '.github/workflows/retail-peer-minexp.yml'
+  workflow_dispatch:
+
+jobs:
+  run-minexp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -q pandas numpy scikit-learn
+      - name: Download Rossmann public mirror
+        run: |
+          mkdir -p peer_minexp
+          curl -fL --retry 3 -o peer_minexp/train.csv https://raw.githubusercontent.com/ahmedbadr97/Rossmann-Store-Sales/main/dataset/raw/train.csv
+          curl -fL --retry 3 -o peer_minexp/store.csv https://raw.githubusercontent.com/ahmedbadr97/Rossmann-Store-Sales/main/dataset/raw/store.csv
+          wc -l peer_minexp/train.csv peer_minexp/store.csv
+      - name: Run minimum experiment
+        run: python research/peer_uncertainty_minexp.py
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: retail-peer-minexp-results
+          path: |
+            peer_minexp/summary.json
+            peer_minexp/store_diagnostics.csv
+            peer_minexp/gaps_2014.csv
+          retention-days: 14
