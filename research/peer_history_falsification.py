@@ -14,10 +14,9 @@ DELTAS = [0.05, 0.10, 0.20]
 CONTAM_FRACS = [0.0, 0.25, 0.50, 0.75, 1.0]
 
 
-def robust_scale_dist(d: np.ndarray) -> np.ndarray:
+def distance_scale(d: np.ndarray) -> float:
     mask = np.isfinite(d) & (d > 0)
-    med = float(np.median(d[mask])) if mask.any() else 1.0
-    return d / med if med > 0 else d
+    return float(np.median(d[mask])) if mask.any() else 1.0
 
 
 def zscore_columns(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -66,7 +65,11 @@ def main() -> None:
     weekly = hist.groupby(["Store", "week"], observed=True)["log_sales"].mean().unstack("week")
     weekly = weekly.reindex(columns=expected_weeks)
 
-    eval_store = ev.groupby("Store")["log_sales"].agg(["mean", "count"]).rename(columns={"mean": "eval_log", "count": "eval_n"})
+    eval_store = (
+        ev.groupby("Store")["log_sales"]
+        .agg(["mean", "count"])
+        .rename(columns={"mean": "eval_log", "count": "eval_n"})
+    )
     hist_coverage = weekly.notna().sum(axis=1)
     eligible_ids = hist_coverage[hist_coverage >= max(1, args.history_weeks - 4)].index.intersection(
         eval_store[eval_store["eval_n"] >= 30].index
@@ -76,20 +79,21 @@ def main() -> None:
     eval_store = eval_store.loc[eligible_ids].copy()
     store = store[store["Store"].isin(eligible_ids)].copy().set_index("Store").loc[eligible_ids]
 
-    # Impute occasional missing weeks by each store's own history mean.
+    # Impute occasional missing weeks by the focal store's own historical mean.
     weekly = weekly.T.fillna(weekly.mean(axis=1)).T
     ids = weekly.index.to_numpy()
     n = len(ids)
     if n <= args.k:
         raise RuntimeError(f"Not enough eligible stores: {n}")
 
-    # Performance history = weekly log-sales trajectory. Standardization is per week across stores.
+    # Performance history = 24-week weekly log-sales trajectory.
     perf_raw = weekly.to_numpy(dtype=float)
-    perf_z, perf_mu, perf_sd = zscore_columns(perf_raw)
-    perf_dist_clean = pairwise_distances(perf_z, metric="euclidean") / np.sqrt(perf_z.shape[1])
-    perf_dist_clean = robust_scale_dist(perf_dist_clean)
+    perf_z, _, perf_sd = zscore_columns(perf_raw)
+    perf_raw_dist = pairwise_distances(perf_z, metric="euclidean") / np.sqrt(perf_z.shape[1])
+    perf_scale = distance_scale(perf_raw_dist)
+    perf_dist_clean = perf_raw_dist / perf_scale
 
-    # Structural/context features only. Customers are intentionally excluded because they are a contemporaneous outcome-like variable.
+    # Structural/context features only. Customers are intentionally excluded because they are outcome-like.
     context = pd.DataFrame(index=store.index)
     comp = pd.to_numeric(store["CompetitionDistance"], errors="coerce")
     comp = comp.fillna(comp.median())
@@ -98,12 +102,13 @@ def main() -> None:
     cats = pd.get_dummies(store[["StoreType", "Assortment"]].astype(str), drop_first=False, dtype=float)
     context = pd.concat([context, cats], axis=1)
     context_z, _, _ = zscore_columns(context.to_numpy(dtype=float))
-    context_dist = pairwise_distances(context_z, metric="euclidean") / np.sqrt(context_z.shape[1])
-    context_dist = robust_scale_dist(context_dist)
+    context_raw_dist = pairwise_distances(context_z, metric="euclidean") / np.sqrt(context_z.shape[1])
+    context_scale = distance_scale(context_raw_dist)
+    context_dist = context_raw_dist / context_scale
 
     y_eval = eval_store.loc[ids, "eval_log"].to_numpy(dtype=float)
 
-    # Clean peer sets and baseline benchmarking error for each history weight alpha.
+    # Clean peer sets and clean-period benchmarking accuracy.
     clean_peer_sets: dict[float, list[np.ndarray]] = {}
     clean_benchmarks: dict[float, np.ndarray] = {}
     clean_scores: dict[float, np.ndarray] = {}
@@ -121,74 +126,82 @@ def main() -> None:
         clean_benchmarks[alpha] = bench
         clean_scores[alpha] = bench - y_eval
         err = np.abs(bench - y_eval)
-        comparability_rows.append({
-            "alpha": alpha,
-            "n_stores": n,
-            "k": args.k,
-            "clean_mae_log": float(err.mean()),
-            "clean_median_ae_log": float(np.median(err)),
-            "clean_rmse_log": float(np.sqrt(np.mean((bench - y_eval) ** 2))),
-        })
+        comparability_rows.append(
+            {
+                "alpha": alpha,
+                "n_stores": n,
+                "k": args.k,
+                "clean_mae_log": float(err.mean()),
+                "clean_median_ae_log": float(np.median(err)),
+                "clean_rmse_log": float(np.sqrt(np.mean((bench - y_eval) ** 2))),
+            }
+        )
 
     comparability = pd.DataFrame(comparability_rows)
     base_mae = float(comparability.loc[comparability["alpha"] == 0.0, "clean_mae_log"].iloc[0])
-    comparability["mae_improvement_vs_context_pct"] = 100 * (base_mae - comparability["clean_mae_log"]) / base_mae
+    comparability["mae_improvement_vs_context_pct"] = 100 * (
+        base_mae - comparability["clean_mae_log"]
+    ) / base_mae
     comparability.to_csv(outdir / "clean_comparability.csv", index=False)
 
-    # Shock recovery. Only the focal store is shocked; candidate peers remain observed.
+    # Semi-synthetic shock recovery. Only the focal store is shocked; candidate peers stay observed.
+    # Clean focal gap is subtracted, so recovery targets only the KNOWN injected shock.
     detail_rows = []
     for delta in DELTAS:
-        shock_log = float(np.log(1.0 - delta))  # negative
+        shock_log = float(np.log(1.0 - delta))  # negative log-sales shift
         true_effect = -shock_log
         for contam_frac in CONTAM_FRACS:
             n_contam = int(round(args.history_weeks * contam_frac))
-            contam_idx = np.arange(args.history_weeks - n_contam, args.history_weeks) if n_contam > 0 else np.array([], dtype=int)
+            contam_idx = (
+                np.arange(args.history_weeks - n_contam, args.history_weeks)
+                if n_contam > 0
+                else np.array([], dtype=int)
+            )
+
+            modified_targets = perf_z.copy()
+            if n_contam > 0:
+                modified_targets[:, contam_idx] += shock_log / perf_sd[contam_idx]
+            shock_perf_dist = (
+                pairwise_distances(modified_targets, perf_z, metric="euclidean")
+                / np.sqrt(perf_z.shape[1])
+                / perf_scale
+            )
 
             for alpha in ALPHAS:
+                dshock = (1.0 - alpha) * context_dist + alpha * shock_perf_dist
                 clean_b = clean_benchmarks[alpha]
                 clean_s = clean_scores[alpha]
                 clean_peers = clean_peer_sets[alpha]
 
                 for i in range(n):
-                    if alpha == 0.0 or n_contam == 0:
-                        shock_peers = clean_peers[i]
-                    else:
-                        v = perf_z[i].copy()
-                        v[contam_idx] += shock_log / perf_sd[contam_idx]
-                        dp = np.sqrt(np.mean((perf_z - v) ** 2, axis=1))
-                        # Same normalization as the clean performance distance matrix.
-                        # perf_dist_clean was normalized by its median; recover that scale from raw pairwise distances.
-                        raw_clean = pairwise_distances(perf_z[[i]], perf_z, metric="euclidean")[0] / np.sqrt(perf_z.shape[1])
-                        nz = raw_clean[raw_clean > 0]
-                        # Use global-ish stable scaling: median of focal clean row. This only rescales the performance component.
-                        scale = float(np.median(nz)) if len(nz) else 1.0
-                        dp = dp / scale
-                        drow = (1.0 - alpha) * context_dist[i] + alpha * dp
-                        shock_peers = topk_peers(drow, i, args.k)
-
+                    shock_peers = topk_peers(dshock[i], i, args.k)
                     shock_b = float(y_eval[shock_peers].mean())
                     shock_target_eval = y_eval[i] + shock_log
                     shock_score = shock_b - shock_target_eval
                     detected = shock_score - clean_s[i]
                     recovery = detected / true_effect
                     attenuation = 1.0 - recovery
-                    overlap = len(set(clean_peers[i].tolist()).intersection(shock_peers.tolist())) / args.k
+                    overlap = len(
+                        set(clean_peers[i].tolist()).intersection(shock_peers.tolist())
+                    ) / args.k
 
-                    detail_rows.append({
-                        "Store": int(ids[i]),
-                        "alpha": alpha,
-                        "delta": delta,
-                        "contam_frac": contam_frac,
-                        "n_contam_weeks": n_contam,
-                        "true_log_effect": true_effect,
-                        "clean_benchmark_log": float(clean_b[i]),
-                        "shock_benchmark_log": shock_b,
-                        "benchmark_shift_log": shock_b - float(clean_b[i]),
-                        "detected_log_effect": detected,
-                        "recovery": recovery,
-                        "attenuation": attenuation,
-                        "peer_overlap": overlap,
-                    })
+                    detail_rows.append(
+                        {
+                            "Store": int(ids[i]),
+                            "alpha": alpha,
+                            "delta": delta,
+                            "contam_frac": contam_frac,
+                            "n_contam_weeks": n_contam,
+                            "true_log_effect": true_effect,
+                            "clean_benchmark_log": float(clean_b[i]),
+                            "shock_benchmark_log": shock_b,
+                            "benchmark_shift_log": shock_b - float(clean_b[i]),
+                            "detected_log_effect": detected,
+                            "recovery": recovery,
+                            "attenuation": attenuation,
+                            "peer_overlap": overlap,
+                        }
+                    )
 
     detail = pd.DataFrame(detail_rows)
     detail.to_csv(outdir / "shock_recovery_detail.csv", index=False)
@@ -212,10 +225,16 @@ def main() -> None:
     summary.to_csv(outdir / "shock_recovery_summary.csv", index=False)
 
     best_alpha = float(comparability.sort_values("clean_mae_log").iloc[0]["alpha"])
-    best_clean_improvement = float(comparability.loc[comparability["alpha"] == best_alpha, "mae_improvement_vs_context_pct"].iloc[0])
+    best_clean_improvement = float(
+        comparability.loc[
+            comparability["alpha"] == best_alpha, "mae_improvement_vs_context_pct"
+        ].iloc[0]
+    )
 
-    # Falsification-oriented verdict. Require BOTH benefit under clean history and deterioration under contamination.
-    best_slice = summary[(summary["alpha"] == best_alpha) & (summary["delta"] == 0.10)].sort_values("contam_frac")
+    # Predeclared falsification gate: both a clean-history benefit and a contamination cost must exist.
+    best_slice = summary[
+        (summary["alpha"] == best_alpha) & (summary["delta"] == 0.10)
+    ].sort_values("contam_frac")
     rec0 = float(best_slice.loc[best_slice["contam_frac"] == 0.0, "mean_recovery"].iloc[0])
     rec100 = float(best_slice.loc[best_slice["contam_frac"] == 1.0, "mean_recovery"].iloc[0])
     monotonic = bool(np.all(np.diff(best_slice["mean_recovery"].to_numpy()) <= 0.01))
@@ -245,28 +264,42 @@ def main() -> None:
     }
     (outdir / "verdict.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
 
-    # Compact Markdown for inspection through GitHub text tools.
-    lines = []
-    lines.append("# Peer-History Falsification Experiment")
-    lines.append("")
-    lines.append(f"Eligible stores: **{n}**; K={args.k}")
-    lines.append(f"History: {hist_start.date()} to {hist_end.date()} ({args.history_weeks} weeks)")
-    lines.append(f"Evaluation: {eval_start.date()} to {eval_end.date()} ({args.eval_weeks} weeks)")
-    lines.append("")
-    lines.append("## Clean comparability")
-    lines.append("")
-    lines.append(comparability.round(4).to_markdown(index=False))
-    lines.append("")
-    lines.append("## Primary falsification (10% persistent shock)")
-    lines.append("")
-    primary = summary[summary["delta"] == 0.10][["alpha", "contam_frac", "mean_recovery", "median_recovery", "mean_peer_overlap", "mean_benchmark_shift_log", "share_recovery_below_80pct"]]
-    lines.append(primary.round(4).to_markdown(index=False))
-    lines.append("")
-    lines.append("## Verdict")
-    lines.append("")
-    lines.append("```json")
-    lines.append(json.dumps(verdict, indent=2))
-    lines.append("```")
+    lines = [
+        "# Peer-History Falsification Experiment",
+        "",
+        f"Eligible stores: **{n}**; K={args.k}",
+        f"History: {hist_start.date()} to {hist_end.date()} ({args.history_weeks} weeks)",
+        f"Evaluation: {eval_start.date()} to {eval_end.date()} ({args.eval_weeks} weeks)",
+        "",
+        "## Clean comparability",
+        "",
+        comparability.round(4).to_markdown(index=False),
+        "",
+        "## Primary falsification (10% persistent shock)",
+        "",
+    ]
+    primary = summary[summary["delta"] == 0.10][
+        [
+            "alpha",
+            "contam_frac",
+            "mean_recovery",
+            "median_recovery",
+            "mean_peer_overlap",
+            "mean_benchmark_shift_log",
+            "share_recovery_below_80pct",
+        ]
+    ]
+    lines.extend(
+        [
+            primary.round(4).to_markdown(index=False),
+            "",
+            "## Verdict",
+            "",
+            "```json",
+            json.dumps(verdict, indent=2),
+            "```",
+        ]
+    )
     (outdir / "SUMMARY.md").write_text("\n".join(lines), encoding="utf-8")
 
     print(json.dumps(verdict, indent=2))
